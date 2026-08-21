@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip --version)",
+      "Bash(uv --version)",
+      "Bash(where python *)",
+      "Bash(python -m venv .venv)",
+      "Bash(.venv/Scripts/python.exe -m pip install --quiet --upgrade pip)",
+      "Bash(.venv/Scripts/python.exe -m pip install pandas numpy pytest pyyaml python-dotenv scipy)",
+      "Bash(.venv/Scripts/python.exe -m pip install --quiet --no-deps -e .)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_pivots.py)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_indicators.py)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_patterns.py)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_stage.py)",
+      "Bash(.venv/Scripts/python.exe -m pip install --quiet rich requests yfinance)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/)",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_end_to_end.py)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/test_mood.py tests/test_earnings.py -q -p no:cacheprovider --no-header)",
+      "Bash(./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --no-header)",
+      "Bash(./.venv/Scripts/python.exe -m breakout.jobs.morning_scan)"
+    ]
+  }
+}

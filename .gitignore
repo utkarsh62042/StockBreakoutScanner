@@ -1,0 +1,36 @@
+# Secrets and user config
+.env
+config.yaml
+
+# Runtime artifacts
+data_cache/
+logs/
+output/
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
