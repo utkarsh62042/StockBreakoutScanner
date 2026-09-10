@@ -51,15 +51,21 @@ def simulate_trade(
     base_height: float,
     cfg,
 ) -> tuple[dict | None, int]:
-    """Simulate one trade entered at `df.open[entry_idx]`; walk forward until
-    stop / target_2 / time-exit. Returns (trade_dict, exit_idx). trade_dict is
-    None (with exit_idx == entry_idx) if the setup has non-positive risk.
+    """Simulate one trade entered at `df.close[entry_idx]` — the bar on which
+    the signal fired, filled at the 3 PM pre-close price, exactly as the live
+    tracker does. Walk forward until stop / target_2 / time-exit. Returns
+    (trade_dict, exit_idx). trade_dict is None (with exit_idx == entry_idx) if
+    the setup has non-positive risk.
+
+    Exit checks start the bar AFTER entry: the entry bar's high and low mostly
+    printed before we were in the position, so testing them would credit fills
+    that were never available.
 
     target_1 moves the stop to breakeven (matches the live tracker)."""
     n = len(df)
     if entry_idx >= n:
         return None, entry_idx
-    entry = float(df["open"].iloc[entry_idx])
+    entry = float(df["close"].iloc[entry_idx])
     stop = compute_stop(breakout_level, atr_val, cfg.paper_trading.atr_stop_multiplier)
     risk = entry - stop
     if risk <= 0:
@@ -68,12 +74,14 @@ def simulate_trade(
     shares = position_size(cfg.risk.capital, cfg.risk.risk_per_trade_pct, entry, stop)
 
     last = min(entry_idx + cfg.paper_trading.hold_max_days, n - 1)
+    if last <= entry_idx:
+        return None, entry_idx  # no bar after entry — nothing to settle against
     cur_stop = stop
     t1_hit = False
     state = TradeState.TIME_EXIT
     exit_price = float(df["close"].iloc[last])
     exit_idx = last
-    for j in range(entry_idx, last + 1):
+    for j in range(entry_idx + 1, last + 1):
         hi = float(df["high"].iloc[j])
         lo = float(df["low"].iloc[j])
         cl = float(df["close"].iloc[j])
@@ -114,7 +122,8 @@ def backtest_symbol(df: pd.DataFrame, cfg, signal_fn: Signal, warmup: int = _MIN
         if a != a:   # NaN
             i += 1
             continue
-        trade, exit_idx = simulate_trade(df, i + 1, level, a, base_height, cfg)
+        # Entry is the signal bar itself (filled at its close), not the next open.
+        trade, exit_idx = simulate_trade(df, i, level, a, base_height, cfg)
         if trade is None:
             i += 1
             continue

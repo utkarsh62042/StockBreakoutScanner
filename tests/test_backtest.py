@@ -25,7 +25,8 @@ def _df(opens, highs, lows, closes) -> pd.DataFrame:
 
 
 # ── simulate_trade ────────────────────────────────────────────────────────
-# level=100, atr=2 → stop=97, risk=3. entry = open[1] = 100.
+# level=100, atr=2 → stop=97, risk=3. entry = close[1] = 100 (the signal bar's
+# pre-close price). Exit checks start at bar 2.
 
 
 def test_stop_out() -> None:
@@ -45,12 +46,23 @@ def test_target_hit() -> None:
 
 
 def test_target1_moves_stop_to_breakeven() -> None:
-    # High tags target_1 (106) → stop to 100; next bar dips to 99 → exit at 100 (0R).
-    df = _df([100, 100, 100], [101, 107, 101], [99, 99, 99], [100, 100, 100])
+    # Bar 2 tags target_1 (106) → stop to 100; bar 3 dips to 99 → exit at 100 (0R).
+    df = _df([100] * 4, [101, 101, 107, 101], [99, 99, 99, 99], [100] * 4)
     trade, _ = simulate_trade(df, 1, 100.0, 2.0, 20.0, CFG)
     assert trade["state"] == TradeState.STOPPED_OUT
     assert trade["exit_price"] == pytest.approx(100.0)
     assert trade["pnl_r"] == pytest.approx(0.0)
+
+
+def test_entry_bar_extremes_are_not_tradable() -> None:
+    """The entry bar's own high/low printed before the 3 PM fill, so they must
+    not trigger an exit — otherwise the backtest books fills we never had."""
+    # Bar 1 (the entry bar) swings from 96 (below the 97 stop) to 130 (above
+    # the 120 target). Both must be ignored; the flat bar 2 leaves it open.
+    df = _df([100] * 3, [101, 130, 101], [99, 96, 99], [100] * 3)
+    trade, _ = simulate_trade(df, 1, 100.0, 2.0, 20.0, CFG)
+    assert trade["state"] == TradeState.TIME_EXIT
+    assert trade["entry_price"] == pytest.approx(100.0)
 
 
 def test_time_exit() -> None:

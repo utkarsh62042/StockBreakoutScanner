@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from breakout.paper.stats import by_score_band, by_sector, filter_period, full_report
 
 
@@ -35,7 +37,9 @@ def test_by_sector_unknown_bucket() -> None:
 
 
 def test_filter_period() -> None:
-    trades = [_t("A", 70, 1.0, 1000.0, exit_date="2026-08-01"),
+    # Relative to today — a hardcoded "recent" date silently expires.
+    recent = (date.today() - timedelta(days=5)).isoformat()
+    trades = [_t("A", 70, 1.0, 1000.0, exit_date=recent),
               _t("B", 70, 1.0, 1000.0, exit_date="2020-01-01")]
     kept = filter_period(trades, "30d")
     assert len(kept) == 1 and kept[0]["symbol"] == "A"

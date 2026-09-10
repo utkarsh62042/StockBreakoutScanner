@@ -3,10 +3,10 @@
 Every alert the scanner emits becomes a virtual position in the SQLite
 `paper_trades` table. The state machine:
 
-    ALERTED        — alert was generated; entry has not happened yet.
-                     Transitions to ENTERED at next day's open, or CANCELED
-                     if no confirmation within `alert_ttl_days`.
-    ENTERED        — position is open at `entry_price`.
+    ENTERED        — position is open at `entry_price`, the price at the
+                     3:00 PM pre-close scan that confirmed the breakout. This
+                     is the price the trader actually pays, entering in the
+                     3:00–3:20 PM window on the confirmation day itself.
                      Transitions to TARGET_1_HIT, TARGET_HIT, STOPPED_OUT,
                      or TIME_EXIT.
     TARGET_1_HIT   — first target hit (partial); position remains open
@@ -14,7 +14,10 @@ Every alert the scanner emits becomes a virtual position in the SQLite
     TARGET_HIT     — second/full target hit. Terminal.
     STOPPED_OUT    — stop loss hit. Terminal.
     TIME_EXIT      — held > hold_max_days without resolution. Terminal.
-    CANCELED       — alert never confirmed (price moved away). Terminal.
+    CANCELED       — terminal. Legacy: no longer produced, since a trade is
+                     opened at confirmation rather than waiting on one.
+    ALERTED        — legacy state from the old next-day-open entry model. No
+                     longer produced; rows in it are skipped by the settle.
 
 The settle job runs once per trading day after the close and walks every
 open trade through these transitions using that day's OHLC.
@@ -24,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -74,7 +77,16 @@ def position_size(
 
 
 def compute_stop(breakout_level: float, atr: float, multiplier: float = 1.5) -> float:
-    """Volatility-adjusted stop: N × ATR below the breakout level."""
+    """Volatility-adjusted stop: N × ATR below the breakout level.
+
+    Deliberately anchored to the breakout level, NOT to the entry price. The
+    level is the structure whose violation invalidates the setup; anchoring
+    the stop to an entry that printed well above it would place the stop
+    above the level, so an ordinary retest would knock the trade out.
+
+    Everything that depends on what you actually paid — risk per share,
+    position size, targets, R:R — uses the entry price instead.
+    """
     return breakout_level - multiplier * atr
 
 
@@ -87,11 +99,80 @@ def compute_targets(
     """Returns (target_1, target_2).
     Target 1 = entry + r_multiple × risk_per_share (e.g. 2:1 R:R).
     Target 2 = entry + base_height (measured-move projection).
+
+    `entry` is the 3 PM pre-close price, so the quoted R:R is the one the
+    trader actually gets rather than the one an idealised fill at the
+    breakout level would have got.
     """
     risk_per_share = abs(entry - stop)
     target_1 = entry + r_multiple * risk_per_share
     target_2 = entry + base_height
     return target_1, target_2
+
+
+# ── Day-by-day progress ─────────────────────────────────────────────────
+# Two derived columns on `paper_trades` let the user see how a position has
+# behaved since entry without opening a chart:
+#
+#   days_in_trade  "D3"                        — trading days elapsed since entry
+#   daily_moves    "D1:1.0%,D2:3.7%,D3:-2.3%"  — that single day's move
+#
+# The entry day is D0 (the trade was just opened — no movement yet, so it
+# carries no entry in `daily_moves`). Each figure is one day's own move, not a
+# running total: D1 is `entry_price` → D1's close, D2 is D1's close → D2's
+# close, and so on. So D3:-2.3% means the stock fell 2.3% on day three. The
+# whole string is recomputed from cached bars on each settle rather than
+# appended to, so a re-run of the job is idempotent.
+
+
+def compute_daily_progress(
+    entry_date: Any,
+    entry_price: float | None,
+    prices: pd.DataFrame,
+    today: date | None = None,
+) -> tuple[str | None, str | None]:
+    """Return `(days_in_trade, daily_moves)` for one trade.
+
+    `prices` is a date-indexed OHLCV frame (as returned by
+    `Store.read_prices`) that must cover the entry day onwards. Bars after
+    `today` are ignored. On the entry day itself returns `("D0", None)`.
+    Returns `(None, None)` when the trade hasn't been entered or no bar on/after
+    the entry day is cached yet.
+    """
+    if entry_price is None or entry_date is None or prices.empty:
+        return None, None
+    try:
+        entry = pd.to_datetime(entry_date).date()
+        entry_px = float(entry_price)
+    except (TypeError, ValueError):
+        return None, None
+    if entry_px <= 0:
+        return None, None
+
+    bars = prices.sort_index()
+    days = pd.DatetimeIndex(bars.index).date
+    mask = days >= entry
+    if today is not None:
+        mask = mask & (days <= today)
+    bars = bars[mask]
+    if bars.empty:
+        return None, None
+
+    closes = pd.to_numeric(bars["close"], errors="coerce").dropna()
+    if closes.empty:
+        return None, None
+
+    # The entry-day bar is D0 — the position has no elapsed movement on the day
+    # it was opened, so that bar only supplies D1's baseline (`entry_price`, the
+    # price actually paid, rather than D0's close).
+    moves: list[str] = []
+    prev = entry_px
+    for n, close in enumerate(closes.tolist()[1:], start=1):
+        moves.append(f"D{n}:{(close - prev) / prev * 100.0:.1f}%")
+        prev = close
+    if not moves:
+        return "D0", None
+    return f"D{len(moves)}", ",".join(moves)
 
 
 # ── State transitions ───────────────────────────────────────────────────
@@ -129,37 +210,19 @@ def settle_one_trade(
     if state in CLOSED_STATES:
         return None
 
+    if state == TradeState.ALERTED:
+        # Legacy rows from the old next-day-open entry model. Trades are now
+        # opened as ENTERED at the 3 PM confirmation price, so nothing creates
+        # this state any more and there is no entry_price to settle against.
+        logger.warning(
+            f"trade {trade.get('id')} ({trade.get('symbol')}) is in legacy "
+            "ALERTED state — skipping; re-run the scan to open it fresh"
+        )
+        return None
+
     today_iso = today.isoformat()
     today_high = float(today_ohlc["high"])
     today_low = float(today_ohlc["low"])
-    today_open = float(today_ohlc["open"])
-
-    # ── ALERTED bookkeeping ──────────────────────────────────────────────
-    if state == TradeState.ALERTED:
-        alert_date = pd.to_datetime(trade["alert_date"]).date()
-        days_since_alert = (today - alert_date).days
-        if days_since_alert >= cfg.paper_trading.alert_ttl_days:
-            return TradeOutcome(
-                new_state=TradeState.CANCELED,
-                exit_date=today_iso,
-                notes=f"alert_expired_{days_since_alert}d_no_confirmation",
-            )
-        # Transition to ENTERED at today's open if it confirms the breakout
-        breakout_level = float(trade.get("stop_loss") or 0) + 0  # not used here
-        # We treat any trading day after the alert as confirmation, since the
-        # alert itself already required a close > breakout level. The entry
-        # price is today's open (realistic — the trader would act EOD or at
-        # next open). The stop, targets, and shares were set at alert time.
-        risk_per_share = abs(today_open - float(trade["stop_loss"]))
-        outcome = TradeOutcome(
-            new_state=TradeState.ENTERED,
-            notes=f"entered_at_open_{today_open:.2f}",
-        )
-        outcome.exit_price = None  # entered, not exited
-        # Caller updates entry_date/entry_price/shares from these fields:
-        outcome._entered_open = today_open  # type: ignore[attr-defined]
-        outcome._risk_per_share = risk_per_share  # type: ignore[attr-defined]
-        return outcome
 
     # ── For ENTERED / TARGET_1_HIT trades, run exit checks ──────────────
     entry_price = float(trade["entry_price"])
@@ -169,6 +232,13 @@ def settle_one_trade(
     shares = int(trade.get("shares") or 0)
     entry_date = pd.to_datetime(trade["entry_date"]).date()
     days_held = (today - entry_date).days
+
+    # Entry day (D0): we bought at ~3 PM, so the day's high and low are mostly
+    # from bars that printed BEFORE we were in the position. Testing them would
+    # manufacture stops and targets we could never have hit. First exit check
+    # is the next session.
+    if days_held <= 0:
+        return None
 
     # 1. Stop hit
     if today_low <= stop_loss:
@@ -240,20 +310,36 @@ def insert_alert(
     alert_type: str,
     score: float,
     breakout_level: float,
+    entry_price: float,
     atr: float,
     base_height: float,
     cfg: Config,
     alert_date: date | None = None,
 ) -> int:
-    """Insert a new ALERTED paper trade computed from a pattern match."""
+    """Open a paper trade at the 3 PM pre-close confirmation price.
+
+    `entry_price` is that day's price at the moment the scan confirmed the
+    breakout — the price the trader pays entering in the 3:00–3:20 PM window.
+    The trade goes straight to ENTERED: there is no waiting period, so every
+    number on the row (risk per share, position size, both targets, and the
+    R:R they imply) is measured from a fill that is actually obtainable.
+
+    `breakout_level` still anchors the stop — see `compute_stop`.
+    """
     alert_date = alert_date or date.today()
-    entry = breakout_level  # alert is emitted when close > breakout_level
+    entry = float(entry_price)
     stop = compute_stop(breakout_level, atr, cfg.paper_trading.atr_stop_multiplier)
     target_1, target_2 = compute_targets(
         entry, stop, base_height, cfg.paper_trading.target_1_r_multiple
     )
     shares = position_size(
         cfg.risk.capital, cfg.risk.risk_per_trade_pct, entry, stop
+    )
+    # How far above the level we had to pay. A large extension means the move
+    # ran away intraday: risk per share is wider, so `shares` is already
+    # smaller, but it is worth seeing on the row.
+    extension_pct = (
+        (entry - breakout_level) / breakout_level * 100.0 if breakout_level > 0 else 0.0
     )
     return store.insert_paper_trade(
         {
@@ -262,12 +348,18 @@ def insert_alert(
             "alert_date": alert_date.isoformat(),
             "alert_type": alert_type,
             "score": score,
-            "state": TradeState.ALERTED,
+            "state": TradeState.ENTERED,
+            "entry_date": alert_date.isoformat(),
+            "entry_price": entry,
             "stop_loss": stop,
             "target_1": target_1,
             "target_2": target_2,
             "shares": shares,
-            "notes": f"breakout_level={breakout_level:.2f}",
+            "notes": (
+                f"breakout_level={breakout_level:.2f},"
+                f"entry_at_preclose={entry:.2f},"
+                f"extension={extension_pct:+.2f}%"
+            ),
         }
     )
 
@@ -288,9 +380,6 @@ def apply_outcome(store: Any, trade_id: int, outcome: TradeOutcome) -> None:
     if outcome.notes:
         # Append rather than overwrite — multiple transitions can write notes
         fields["notes"] = outcome.notes
-    # Special-case ALERTED -> ENTERED: capture entry price & date
-    entered_open = getattr(outcome, "_entered_open", None)
-    if outcome.new_state == TradeState.ENTERED and entered_open is not None:
-        fields["entry_price"] = entered_open
-        fields["entry_date"] = datetime.now().date().isoformat()
+    # entry_price / entry_date are written once, at insert time — a trade is
+    # already ENTERED when it is created, so no transition sets them.
     store.update_paper_trade(trade_id, **fields)

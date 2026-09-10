@@ -64,7 +64,8 @@ _SCHEMAS: dict[str, list[str]] = {
         "id", "symbol", "pattern", "alert_date", "alert_type", "score",
         "state", "entry_date", "entry_price", "stop_loss", "target_1",
         "target_2", "exit_date", "exit_price", "shares", "pnl_inr", "pnl_r",
-        "days_held", "max_favorable", "max_adverse", "notes",
+        "days_held", "days_in_trade", "daily_moves", "max_favorable",
+        "max_adverse", "notes",
     ],
     "failed_breakouts": [
         "symbol", "breakout_date", "failure_date", "pattern", "original_score",

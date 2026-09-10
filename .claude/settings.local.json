@@ -18,7 +18,8 @@
       "Bash(.venv/Scripts/python.exe -m pytest tests/test_end_to_end.py)",
       "Bash(./.venv/Scripts/python.exe -m pytest tests/test_mood.py tests/test_earnings.py -q -p no:cacheprovider --no-header)",
       "Bash(./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --no-header)",
-      "Bash(./.venv/Scripts/python.exe -m breakout.jobs.morning_scan)"
+      "Bash(./.venv/Scripts/python.exe -m breakout.jobs.morning_scan)",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -m pytest -q 2>&1)"
     ]
   }
 }

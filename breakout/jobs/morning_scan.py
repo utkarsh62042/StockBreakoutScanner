@@ -27,7 +27,12 @@ from breakout.analysis.rs import period_return, rs_percentile_ranks, rs_points
 from breakout.analysis.stage import Stage, classify_stage
 from breakout.analysis.tightness import tightness_score
 from breakout.config import Config, ensure_runtime_dirs, load_config
-from breakout.data.fetcher import FetchError, fetch_earnings_dates, fetch_yf_index, make_fetcher
+from breakout.data.fetcher import (
+    RateLimitError,
+    fetch_earnings_dates,
+    fetch_yf_index,
+    make_fetcher,
+)
 from breakout.data.store import Store
 from breakout.data.universe import refresh_universe_if_stale
 from breakout.filters.earnings import in_earnings_blackout
@@ -128,20 +133,26 @@ def _run(store: Store, cfg: Config) -> int:
     # 2. Update price cache
     fetcher = make_fetcher(cfg)
     logger.info(f"fetching prices for {len(symbols)} symbols via {fetcher.__class__.__name__}")
-    fetched = 0
-    failed = 0
-    for sym in symbols:
-        latest = store.latest_price_date(sym)
-        if latest is not None and (date.today() - latest).days < 1:
-            continue  # already current
-        try:
-            df = fetcher.fetch_history(sym, days=_PRICE_HISTORY_DAYS)
-            store.upsert_prices(sym, df)
-            fetched += 1
-        except FetchError as e:
-            failed += 1
-            logger.debug(f"skip {sym}: {e}")
-    logger.info(f"prices: fetched={fetched}, failed={failed}, already-current={count - fetched - failed}")
+    stale = [
+        sym for sym in symbols
+        if (latest := store.latest_price_date(sym)) is None
+        or (date.today() - latest).days >= 1
+    ]
+    current = len(symbols) - len(stale)
+    try:
+        # Batched where the backend supports it (yfinance fetches ~50 tickers
+        # per request), sequential otherwise.
+        prices = fetcher.fetch_history_batch(stale, days=_PRICE_HISTORY_DAYS)
+    except RateLimitError as e:
+        # The backend has cut us off. Analysing a half-updated cache would
+        # produce breakout signals from stale prices — worse than no scan.
+        logger.error(f"aborting scan: {e}")
+        return 0
+    for sym, df in prices.items():
+        store.upsert_prices(sym, df)
+    fetched = len(prices)
+    failed = len(stale) - fetched
+    logger.info(f"prices: fetched={fetched}, failed={failed}, already-current={current}")
 
     # 2b. Cross-sectional pre-pass: 63-day returns → relative-strength ranks,
     #     and a sector-trend proxy from those returns.

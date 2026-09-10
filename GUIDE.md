@@ -281,7 +281,7 @@ BreakoutStockAnalyser/
 | `breakout/scoring.py` | `composite_score(features)` — 0–100 score from quality/stage/pattern/volume/RS/tightness/sector inputs. Returns 0 if any hard gate fails. |
 | `breakout/data/store.py` | `Store(workbook_path)` — every read/write to the Excel workbook goes through here. Use as a context manager (flushes on exit). |
 | `breakout/data/universe.py` | `refresh_universe_if_stale(store)` — downloads NIFTY 500 CSV from NSE if cache is >7 days old. |
-| `breakout/data/fetcher.py` | `make_fetcher(cfg)` returns YFinance or AngelOne based on config + credential availability. Both implement `fetch_history(symbol, days)`. |
+| `breakout/data/fetcher.py` | `make_fetcher(cfg)` returns YFinance or AngelOne based on config + credential availability. Both implement `fetch_history(symbol, days)` and `fetch_history_batch(symbols, days)`. Prefer the batch call in loops — YFinance overrides it to fetch ~50 tickers per HTTP request (8x faster over a full universe). **Angel One is disabled as of 2026-09** — its `getCandleData` returns AB1021 "Too many requests" even at 8s spacing (server-side bug on their end, see the fetcher docstring). |
 | `breakout/analysis/pivots.py` | `find_pivots(df, n=5)` — confirmed swing highs and swing lows. Every pattern depends on this being right. |
 | `breakout/analysis/indicators.py` | Pure functions: `sma`, `ema`, `rsi`, `atr`, `macd`, `bollinger_bands`, `adx`, `volume_ratio`. Plus `add_standard_indicators(df)` attaches all of them as columns. |
 | `breakout/analysis/patterns.py` | `detect_fifty_two_week_high_breakout`, `detect_darvas_box`, `detect_nr7`. Plus `detect_all(df, enabled)` runs the enabled set and returns matches sorted by confidence. |
@@ -825,9 +825,21 @@ exit_date, exit_price: ...
 shares: INTEGER
 pnl_inr, pnl_r: REAL  (R = R-multiples)
 days_held: INTEGER
+days_in_trade: TEXT  ("D3" — trading days elapsed since entry; entry day = D0)
+daily_moves: TEXT    ("D1:1.0%,D2:3.7%,D3:-2.3%" — that single day's move)
 max_favorable, max_adverse: REAL
 notes: TEXT
 ```
+
+`days_in_trade` / `daily_moves` are refreshed by `eod_settle` on every run from
+the cached bars, so you can see at a glance how a position has behaved since
+entry. The day the trade was entered is **D0** — no movement yet, so it carries
+no figure. Each later day shows **that day's own move**, not a running total:
+D1 is `entry_price` → D1's close, D2 is D1's close → D2's close, and so on.
+`D3:-2.3%` therefore means the stock fell 2.3% on day three. Because the whole
+string is recomputed rather than appended to, re-running the settle job is
+idempotent. To fill the columns in for trades entered before they existed, run
+`scripts\backfill_daily_progress.py` once (`--dry-run` to preview).
 
 #### `failed_breakouts`
 For tracking signal quality over time. Phase 2 will populate this.

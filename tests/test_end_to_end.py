@@ -5,9 +5,9 @@ ending with a tight consolidation just below the 52-week high, runs it
 through the entire morning + preclose + settle pipeline, and verifies:
 
   1. The morning scan adds it to the setup watchlist.
-  2. The pre-close scan confirms a breakout, emits a CSV alert, and creates
-     a paper trade in ALERTED state.
-  3. The EOD settle transitions ALERTED -> ENTERED on the next bar.
+  2. The pre-close scan confirms a breakout, emits a CSV alert, and opens a
+     paper trade already ENTERED at the 3 PM confirmation price.
+  3. The EOD settle carries that trade forward on the next bar.
 
 This is the closest we can get to a full integration test without hitting
 yfinance or Angel One.
@@ -33,7 +33,6 @@ from breakout.output.alerts import Alert, CSVChannel, dispatch_alerts
 from breakout.paper.tracker import (
     OPEN_STATES,
     TradeState,
-    apply_outcome,
     compute_stop,
     compute_targets,
     insert_alert,
@@ -152,8 +151,10 @@ def test_full_pipeline_alerts_and_persists(tmp_path: Path) -> None:
         assert len(watchlist) == 1
         assert watchlist[0]["symbol"] == "DEMO"
 
-        # ── 4. Pre-close confirmation: paper trade in ALERTED ────────────
+        # ── 4. Pre-close confirmation: trade opens ENTERED at 3 PM price ──
         atr_14 = 1.0  # synthetic — bars are tight
+        # The confirming close prints above the level, as a real breakout does.
+        preclose_price = top.breakout_level * 1.03
         trade_id = insert_alert(
             store,
             symbol="DEMO",
@@ -161,6 +162,7 @@ def test_full_pipeline_alerts_and_persists(tmp_path: Path) -> None:
             alert_type="BREAKOUT",
             score=score,
             breakout_level=top.breakout_level,
+            entry_price=preclose_price,
             atr=atr_14,
             base_height=top.base_height,
             cfg=cfg,
@@ -168,9 +170,11 @@ def test_full_pipeline_alerts_and_persists(tmp_path: Path) -> None:
         assert trade_id > 0
 
         # ── 5. Emit CSV alert ───────────────────────────────────────────
-        entry = top.breakout_level  # at the level
-        stop = compute_stop(entry, atr_14, cfg.paper_trading.atr_stop_multiplier)
-        t1, t2 = compute_targets(entry, stop, top.base_height)
+        entry = preclose_price  # what the trader actually pays at 3 PM
+        stop = compute_stop(top.breakout_level, atr_14, cfg.paper_trading.atr_stop_multiplier)
+        t1, t2 = compute_targets(
+            entry, stop, top.base_height, cfg.paper_trading.target_1_r_multiple
+        )
         shares = position_size(cfg.risk.capital, cfg.risk.risk_per_trade_pct, entry, stop)
         assert shares > 0
 
@@ -188,9 +192,29 @@ def test_full_pipeline_alerts_and_persists(tmp_path: Path) -> None:
         assert len(csv_files) == 1, f"expected 1 CSV, got {csv_files}"
         assert csv_files[0].read_text(encoding="utf-8").count("DEMO") >= 1
 
-        # ── 6. EOD settle: ALERTED -> ENTERED ────────────────────────────
+        # ── 6. The trade is live from the moment it is created ───────────
         trade = store.read_paper_trades_by_state(*OPEN_STATES)[0]
-        assert trade["state"] == TradeState.ALERTED
+        assert trade["state"] == TradeState.ENTERED
+        # Entry, stop, targets and size on the row are the same numbers the
+        # alert quoted — all anchored to the 3 PM price.
+        assert trade["entry_price"] == pytest.approx(entry)
+        assert trade["entry_date"] == date.today().isoformat()
+        assert trade["stop_loss"] == pytest.approx(stop)
+        assert trade["target_1"] == pytest.approx(t1)
+        assert trade["target_2"] == pytest.approx(t2)
+        assert trade["shares"] == shares
+
+        # Same-day settle is a no-op: the day's range printed before our 3 PM
+        # fill, so it cannot stop us out or hand us a target.
+        entry_day_ohlc = {
+            "open": entry * 0.94,   # below the stop
+            "high": entry * 1.30,   # above both targets
+            "low": entry * 0.94,
+            "close": entry,
+        }
+        assert settle_one_trade(trade, entry_day_ohlc, date.today(), cfg) is None
+
+        # Next session, a quiet bar leaves it open and still ENTERED.
         next_day = date.today() + timedelta(days=1)
         tomorrow_ohlc = {
             "open": entry * 1.005,
@@ -198,12 +222,5 @@ def test_full_pipeline_alerts_and_persists(tmp_path: Path) -> None:
             "low": entry * 0.995,
             "close": entry * 1.015,
         }
-        outcome = settle_one_trade(trade, tomorrow_ohlc, next_day, cfg)
-        assert outcome is not None
-        assert outcome.new_state == TradeState.ENTERED
-        apply_outcome(store, trade["id"], outcome)
-
-        # Trade is now ENTERED with entry_price and entry_date set
-        entered = store.read_paper_trades_by_state(TradeState.ENTERED)
-        assert len(entered) == 1
-        assert entered[0]["entry_price"] == pytest.approx(entry * 1.005)
+        assert settle_one_trade(trade, tomorrow_ohlc, next_day, cfg) is None
+        assert len(store.read_paper_trades_by_state(TradeState.ENTERED)) == 1

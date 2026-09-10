@@ -7,8 +7,10 @@ and checks for actual breakout confirmation:
 
 Confirmed breakouts:
   - emit an `ALERT: BREAKOUT` row through every active output channel
-  - log a paper trade in ALERTED state (entry happens at next day's open
-    per the realistic-execution model)
+  - open a paper trade in ENTERED state at the price observed by this scan,
+    matching the real execution: the trader buys in the 3:00–3:20 PM window
+    on the confirmation day. Entry, stop, targets and position size are all
+    derived from that same price, so the quoted R:R is obtainable.
   - add to the pullback watchlist so future retests can be flagged
 
 Run with:  python -m breakout.jobs.preclose_scan
@@ -22,7 +24,7 @@ from datetime import date
 from breakout.analysis.indicators import atr
 from breakout.analysis.patterns import PatternMatch
 from breakout.config import Config, ensure_runtime_dirs, load_config
-from breakout.data.fetcher import FetchError, make_fetcher
+from breakout.data.fetcher import FetchError, RateLimitError, make_fetcher
 from breakout.data.store import Store
 from breakout.logging_setup import setup_logging
 from breakout.output.alerts import (
@@ -80,6 +82,9 @@ def _run(store: Store, cfg: Config) -> int:
             # Short window — we just need today's close + 20 days of volume history
             df = fetcher.fetch_history(symbol, days=60)
             store.upsert_prices(symbol, df)
+        except RateLimitError as e:
+            logger.error(f"stopping confirmation pass: {e}")
+            break
         except FetchError as e:
             logger.warning(f"skip {symbol}: {e}")
             continue
@@ -144,7 +149,7 @@ def _run(store: Store, cfg: Config) -> int:
         )
         alerts.append(alert)
 
-        # Paper trade in ALERTED state
+        # Paper trade opened at this scan's price — same numbers as the alert
         insert_alert(
             store,
             symbol=symbol,
@@ -152,6 +157,7 @@ def _run(store: Store, cfg: Config) -> int:
             alert_type="BREAKOUT",
             score=score,
             breakout_level=breakout_level,
+            entry_price=close,
             atr=atr_14,
             base_height=float(row.get("base_height") or 0),
             cfg=cfg,
@@ -179,6 +185,9 @@ def _run(store: Store, cfg: Config) -> int:
         try:
             df = fetcher.fetch_history(symbol, days=60)
             store.upsert_prices(symbol, df)
+        except RateLimitError as e:
+            logger.error(f"stopping pullback pass: {e}")
+            break
         except FetchError as e:
             logger.warning(f"skip pullback {symbol}: {e}")
             continue
@@ -209,7 +218,7 @@ def _run(store: Store, cfg: Config) -> int:
         )
         insert_alert(
             store, symbol=symbol, pattern="pullback", alert_type="PULLBACK_ENTRY",
-            score=pb_score, breakout_level=level, atr=atr_14,
+            score=pb_score, breakout_level=level, entry_price=close, atr=atr_14,
             base_height=max(0.0, close - level), cfg=cfg,
         )
 

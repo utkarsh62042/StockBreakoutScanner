@@ -3,7 +3,6 @@
 For every open paper trade, fetches today's OHLC and walks it through the
 state machine:
 
-    ALERTED        -> ENTERED (next-day open) | CANCELED (TTL expired)
     ENTERED        -> STOPPED_OUT | TARGET_HIT | TARGET_1_HIT | TIME_EXIT
     TARGET_1_HIT   -> STOPPED_OUT (stop now at breakeven) | TARGET_HIT | TIME_EXIT
 
@@ -20,12 +19,13 @@ import logging
 from datetime import date
 
 from breakout.config import Config, ensure_runtime_dirs, load_config
-from breakout.data.fetcher import FetchError, make_fetcher
+from breakout.data.fetcher import FetchError, RateLimitError, make_fetcher
 from breakout.data.store import Store
 from breakout.logging_setup import setup_logging
 from breakout.paper.tracker import (
     OPEN_STATES,
     apply_outcome,
+    compute_daily_progress,
     settle_one_trade,
 )
 from breakout.trading_calendar import require_trading_day
@@ -76,12 +76,19 @@ def _run(store: Store, cfg: Config) -> int:
             try:
                 df = fetcher.fetch_history(symbol, days=10)
                 store.upsert_prices(symbol, df)
+            except RateLimitError as e:
+                logger.error(f"stopping settle pass: {e}")
+                break
             except FetchError as e:
                 logger.warning(f"skip {symbol}: {e}")
                 continue
             symbols_seen.add(symbol)
 
-        prices = store.read_prices(symbol, lookback_days=5)
+        # Enough history to rebuild the whole day-by-day progress string for a
+        # position held to its time-exit limit.
+        prices = store.read_prices(
+            symbol, lookback_days=cfg.paper_trading.hold_max_days + 10
+        )
         if prices.empty:
             logger.warning(f"skip {symbol}: no cached prices")
             continue
@@ -102,11 +109,14 @@ def _run(store: Store, cfg: Config) -> int:
             "close": float(latest_row["close"]),
         }
         outcome = settle_one_trade(trade, today_ohlc, today, cfg)
+        if outcome is not None:
+            apply_outcome(store, trade["id"], outcome)
+            transitions += 1
+
+        _update_daily_progress(store, trade, prices, today)
         if outcome is None:
             continue
 
-        apply_outcome(store, trade["id"], outcome)
-        transitions += 1
         logger.info(
             f"{symbol} #{trade['id']}: {trade['state']} -> {outcome.new_state} "
             f"({outcome.notes})"
@@ -117,6 +127,20 @@ def _run(store: Store, cfg: Config) -> int:
         logger.info(f"{failed} failed breakout(s) flagged (EXIT_SIGNAL)")
 
     return transitions
+
+
+def _update_daily_progress(store, trade: dict, prices, today: date) -> None:
+    """Refresh the `days_in_trade` / `daily_moves` columns for one trade.
+
+    A trade is ENTERED from the moment it is created, so entry_date and
+    entry_price are always already on the row.
+    """
+    label, moves = compute_daily_progress(
+        trade.get("entry_date"), trade.get("entry_price"), prices, today
+    )
+    if label is None:
+        return
+    store.update_paper_trade(trade["id"], days_in_trade=label, daily_moves=moves)
 
 
 # A breakout that closes back below its level within this many days is "failed"

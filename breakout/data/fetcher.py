@@ -3,18 +3,29 @@
 Two implementations are supported:
 
     `YFinanceFetcher`    — uses yfinance + NSE `.NS` suffix. No credentials
-                           needed. Less reliable for batch use (occasional
-                           rate-limiting), but ideal for development.
+                           needed. Fetches up to `batch_chunk_size` tickers per
+                           HTTP call, so a 500-name universe costs ~10 requests
+                           (~30s) rather than 500. Currently the default.
 
     `AngelOneFetcher`    — uses Angel One's SmartAPI. Requires API key,
-                           Client Code, PIN, and TOTP secret in `.env`.
-                           Production-quality but needs an active demat
-                           account with API access enabled.
+                           Client Code, PIN, and TOTP secret in `.env`. One
+                           request per symbol; no batch endpoint exists.
+
+                           CURRENTLY UNUSABLE for full-universe scans: as of
+                           2026-09 `getCandleData` returns AB1021 "Too many
+                           requests" even at 8s between requests, a known
+                           server-side false positive affecting many users
+                           (smartapi forum topic 5639) that Angel One has not
+                           acknowledged. `config.yaml` is on yfinance because
+                           of this. Retry Angel One when they ship a fix.
 
 `make_fetcher(cfg)` picks the right backend based on `cfg.data_source`,
-falling back to yfinance if Angel One credentials are missing — this lets
-the scanner run end-to-end during development before the user has
-provisioned SmartAPI access.
+falling back to yfinance if Angel One credentials are missing.
+
+Note that yfinance is an unofficial scrape with no uptime guarantee. The
+batch path degrades gracefully — symbols Yahoo omits from a multi-ticker
+response are retried individually — but a long-term production setup wants a
+paid/official feed.
 """
 
 from __future__ import annotations
@@ -37,6 +48,15 @@ class FetchError(RuntimeError):
     """Raised when an OHLCV fetch fails after retries."""
 
 
+class RateLimitError(FetchError):
+    """Raised when the backend keeps rate-limiting us (circuit breaker tripped).
+
+    Distinct from a plain `FetchError` so callers can abort the whole run
+    instead of marching through the rest of the universe collecting the same
+    error on every symbol.
+    """
+
+
 # Default polite delay between requests in batch mode. yfinance recommends
 # ~0.5s; Angel One has documented rate limits but is more permissive.
 _DEFAULT_BATCH_SLEEP_SECONDS = 0.5
@@ -46,6 +66,30 @@ _REQUIRED_COLS = ["open", "high", "low", "close", "volume"]
 # Retry policy for transient fetch failures (rate limits, flaky responses).
 _MAX_FETCH_RETRIES = 3
 _RETRY_BASE_DELAY = 1.0     # seconds; exponential backoff 1s, 2s, 4s, ...
+
+# Rate-limit handling. A 429/AB1021 is not a normal transient error: retrying
+# it on the same cadence just burns the next quota window too. So we back off
+# much harder than for other failures, and permanently slow the throttle down
+# for the rest of the run (halving back toward the base rate only after a long
+# clean streak).
+_RATE_LIMIT_BASE_DELAY = 5.0        # seconds; 5s, 10s, 20s, ...
+_RATE_LIMIT_MAX_MULTIPLIER = 8.0    # throttle can grow to 8x the base interval
+_RATE_LIMIT_DECAY_AFTER = 25        # consecutive OK fetches before easing off
+# If this many symbols in a row die to rate limits, the backend has stopped
+# serving us — abort rather than spending 20 minutes proving it.
+_RATE_LIMIT_CIRCUIT_BREAK = 5
+
+_RATE_LIMIT_MARKERS = ("too many requests", "ab1021", "rate limit", "429", "access denied")
+
+
+def _is_rate_limit(exc: BaseException) -> bool:
+    """True if `exc` looks like a backend rate-limit rejection.
+
+    Both backends surface these as opaque error strings (SmartAPI wraps the
+    AB1021 body, yfinance a 429), so matching on the message is the only
+    option available to us.
+    """
+    return any(m in str(exc).lower() for m in _RATE_LIMIT_MARKERS)
 
 
 class DataFetcher(ABC):
@@ -66,19 +110,52 @@ class DataFetcher(ABC):
 
     def __init__(self) -> None:
         self._last_request_ts = 0.0
+        # Adaptive throttle: grows on rate limits, decays after a clean streak.
+        self._interval_multiplier = 1.0
+        self._clean_streak = 0
+        self._consecutive_rate_limited_symbols = 0
 
     @abstractmethod
     def _fetch_once(self, symbol: str, days: int = 300) -> pd.DataFrame:
         """Single fetch attempt for `symbol` (no retry/throttle)."""
 
+    @property
+    def effective_interval(self) -> float:
+        """Current inter-request spacing, including any rate-limit penalty."""
+        return self.min_request_interval * self._interval_multiplier
+
     def _throttle(self) -> None:
-        if self.min_request_interval <= 0:
+        interval = self.effective_interval
+        if interval <= 0:
             return
         elapsed = time.monotonic() - self._last_request_ts
-        wait = self.min_request_interval - elapsed
+        wait = interval - elapsed
         if wait > 0:
             time.sleep(wait)
         self._last_request_ts = time.monotonic()
+
+    def _on_rate_limited(self) -> None:
+        """Widen the throttle after a rate-limit rejection."""
+        self._clean_streak = 0
+        if self._interval_multiplier < _RATE_LIMIT_MAX_MULTIPLIER:
+            self._interval_multiplier = min(
+                _RATE_LIMIT_MAX_MULTIPLIER, self._interval_multiplier * 2
+            )
+            logger.warning(
+                f"rate limited — slowing to {self.effective_interval:.2f}s between requests"
+            )
+
+    def _on_success(self) -> None:
+        self._consecutive_rate_limited_symbols = 0
+        if self._interval_multiplier <= 1.0:
+            return
+        self._clean_streak += 1
+        if self._clean_streak >= _RATE_LIMIT_DECAY_AFTER:
+            self._clean_streak = 0
+            self._interval_multiplier = max(1.0, self._interval_multiplier / 2)
+            logger.info(
+                f"rate limit eased — {self.effective_interval:.2f}s between requests"
+            )
 
     def fetch_history(
         self,
@@ -88,18 +165,40 @@ class DataFetcher(ABC):
     ) -> pd.DataFrame:
         """Fetch the most recent `days` trading days for `symbol`, with
         throttling and exponential-backoff retries. Raises `FetchError` if all
-        attempts fail."""
+        attempts fail, or `RateLimitError` if the backend has been rate-limiting
+        every symbol for a while (the caller should stop, not keep going)."""
         last_err: Exception | None = None
+        rate_limited = False
         for attempt in range(max_retries):
             self._throttle()
             try:
-                return self._fetch_once(symbol, days=days)
+                df = self._fetch_once(symbol, days=days)
             except Exception as e:  # includes FetchError
                 last_err = e
-                if attempt < max_retries - 1:
+                if _is_rate_limit(e):
+                    rate_limited = True
+                    self._on_rate_limited()
+                    delay = _RATE_LIMIT_BASE_DELAY * (2 ** attempt)
+                else:
                     delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                if attempt < max_retries - 1:
                     logger.debug(f"retry {symbol} in {delay:.0f}s (attempt {attempt + 1}): {e}")
                     time.sleep(delay)
+            else:
+                self._on_success()
+                return df
+
+        if rate_limited:
+            self._consecutive_rate_limited_symbols += 1
+            if self._consecutive_rate_limited_symbols >= _RATE_LIMIT_CIRCUIT_BREAK:
+                raise RateLimitError(
+                    f"{self.__class__.__name__}: rate limited on "
+                    f"{self._consecutive_rate_limited_symbols} symbols in a row "
+                    f"(last: {symbol}) — giving up on this run. Wait for the "
+                    f"quota window to reset and re-run."
+                ) from last_err
+        else:
+            self._consecutive_rate_limited_symbols = 0
         raise FetchError(f"{symbol}: failed after {max_retries} attempts: {last_err}") from last_err
 
     def fetch_history_batch(
@@ -117,19 +216,29 @@ class DataFetcher(ABC):
         for sym in symbols:
             try:
                 results[sym] = self.fetch_history(sym, days=days)
+            except RateLimitError:
+                raise      # circuit breaker — stop the batch, don't churn
             except Exception as e:
                 logger.warning(f"fetch failed for {sym}: {e}")
         return results
 
 
 def _normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure lowercase columns + the 5 required fields, sorted ascending."""
+    """Ensure lowercase columns + the 5 required fields, sorted ascending.
+
+    The index is forced tz-naive: yfinance's `Ticker.history` returns bars
+    stamped Asia/Kolkata while its multi-ticker `download` returns tz-naive
+    ones, and a store holding both can't be compared or joined. These are daily
+    bars, so dropping the zone loses nothing.
+    """
     df = df.rename(columns={c: c.lower() for c in df.columns})
     missing = [c for c in _REQUIRED_COLS if c not in df.columns]
     if missing:
         raise FetchError(f"missing required columns: {missing}")
     df = df[_REQUIRED_COLS].sort_index()
     df = df.dropna(subset=["close"])
+    if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
     return df
 
 
@@ -146,27 +255,120 @@ class YFinanceFetcher(DataFetcher):
 
     min_request_interval = 0.5   # yfinance: ~2 req/s is polite
 
+    #: Tickers per `yf.download` call. Yahoo accepts a few hundred, but large
+    #: chunks make one flaky ticker retry the whole group, and the URL grows
+    #: unwieldy. 50 keeps a 500-name universe to ~10 requests.
+    batch_chunk_size = 50
+
     def __init__(self, suffix: str = ".NS"):
         super().__init__()
         self.suffix = suffix
         # Lazy import so the package can be loaded without yfinance present.
         import yfinance as yf  # noqa: F401
 
+    def _ticker(self, symbol: str) -> str:
+        return symbol if symbol.endswith(self.suffix) else f"{symbol}{self.suffix}"
+
+    @staticmethod
+    def _period_for(days: int) -> str:
+        """Smallest yfinance period covering `days` trading days."""
+        return f"{max(1, int((days / 252) + 0.99))}y"
+
     def _fetch_once(self, symbol: str, days: int = 300) -> pd.DataFrame:
         import yfinance as yf
 
-        ticker = symbol if symbol.endswith(self.suffix) else f"{symbol}{self.suffix}"
-        # Choose period: trading days / 252 -> years, rounded up.
-        years = max(1, int((days / 252) + 0.99))
-        period = f"{years}y"
+        ticker = self._ticker(symbol)
         try:
             t = yf.Ticker(ticker)
-            df = t.history(period=period, interval="1d", auto_adjust=False)
+            df = t.history(period=self._period_for(days), interval="1d", auto_adjust=False)
         except Exception as e:
             raise FetchError(f"yfinance error for {symbol}: {e}") from e
         if df is None or df.empty:
             raise FetchError(f"yfinance returned empty data for {symbol}")
         return _normalize_dataframe(df)
+
+    def _download_chunk(self, symbols: list[str], days: int) -> dict[str, pd.DataFrame]:
+        """One multi-ticker `yf.download` call. Returns only the symbols that
+        came back with usable bars — callers retry the rest individually."""
+        import yfinance as yf
+
+        tickers = [self._ticker(s) for s in symbols]
+        raw = yf.download(
+            tickers,
+            period=self._period_for(days),
+            interval="1d",
+            auto_adjust=False,
+            group_by="ticker",
+            threads=True,
+            progress=False,
+            actions=False,
+        )
+        if raw is None or raw.empty:
+            raise FetchError(f"yfinance returned nothing for {len(symbols)} tickers")
+
+        out: dict[str, pd.DataFrame] = {}
+        for sym, tk in zip(symbols, tickers):
+            try:
+                # A multi-ticker download yields (ticker, field) columns; a
+                # single-ticker one collapses to plain field columns.
+                sub = raw[tk] if isinstance(raw.columns, pd.MultiIndex) else raw
+            except KeyError:
+                continue     # Yahoo dropped this ticker entirely
+            if sub is None or sub.empty:
+                continue
+            try:
+                df = _normalize_dataframe(sub.dropna(how="all"))
+            except FetchError:
+                continue
+            if not df.empty:
+                out[sym] = df
+        return out
+
+    def fetch_history_batch(
+        self,
+        symbols: list[str],
+        days: int = 300,
+        sleep_between: float = _DEFAULT_BATCH_SLEEP_SECONDS,
+    ) -> dict[str, pd.DataFrame]:
+        """Fetch many symbols using Yahoo's multi-ticker endpoint.
+
+        Roughly an order of magnitude faster than one request per symbol: a
+        500-name universe becomes ~10 HTTP calls. Symbols missing from a chunk's
+        response (Yahoo silently drops some) fall back to an individual fetch,
+        so the result is as complete as the sequential path.
+        """
+        results: dict[str, pd.DataFrame] = {}
+        missing: list[str] = []
+
+        chunks = [
+            symbols[i:i + self.batch_chunk_size]
+            for i in range(0, len(symbols), self.batch_chunk_size)
+        ]
+        for n, chunk in enumerate(chunks, 1):
+            self._throttle()
+            try:
+                got = self._download_chunk(chunk, days=days)
+            except Exception as e:
+                if _is_rate_limit(e):
+                    self._on_rate_limited()
+                logger.warning(f"batch {n}/{len(chunks)} failed ({e}) — falling back per symbol")
+                missing.extend(chunk)
+                continue
+            results.update(got)
+            absent = [s for s in chunk if s not in got]
+            missing.extend(absent)
+            logger.debug(f"batch {n}/{len(chunks)}: {len(got)}/{len(chunk)} symbols")
+
+        if missing:
+            logger.info(f"retrying {len(missing)} symbols individually")
+            for sym in missing:
+                try:
+                    results[sym] = self.fetch_history(sym, days=days)
+                except RateLimitError:
+                    raise    # circuit breaker — stop, don't churn
+                except Exception as e:
+                    logger.debug(f"fetch failed for {sym}: {e}")
+        return results
 
 
 # ── Angel One backend ────────────────────────────────────────────────────
@@ -188,8 +390,12 @@ class AngelOneFetcher(DataFetcher):
     master JSON (Symbol -> Token mapping) is also cached on first use.
     """
 
-    # Angel One historical API allows ~3 req/s; keep a safe margin.
-    min_request_interval = 0.35
+    # Angel One's published limit for getCandleData is 3 req/s, but in practice
+    # a burst anywhere near that trips AB1021 ("Too many requests") a few dozen
+    # symbols into a full-universe scan — the per-minute quota is the binding
+    # one. 1 req/s walks a 500-name universe in ~8 min without complaints; the
+    # adaptive throttle widens this further if we still get rejected.
+    min_request_interval = 1.0
 
     def __init__(
         self,
