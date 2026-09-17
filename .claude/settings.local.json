@@ -19,7 +19,8 @@
       "Bash(./.venv/Scripts/python.exe -m pytest tests/test_mood.py tests/test_earnings.py -q -p no:cacheprovider --no-header)",
       "Bash(./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --no-header)",
       "Bash(./.venv/Scripts/python.exe -m breakout.jobs.morning_scan)",
-      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -m pytest -q 2>&1)"
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -m pytest -q 2>&1)",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import pandas as pd; from breakout.config import load_config; cfg=load_config\\(\\); p=cfg.paths.workbook; print\\(p\\); df=pd.read_excel\\(p, sheet_name='paper_trades'\\); print\\(df.dtypes.to_string\\(\\)\\); print\\(df[['id','symbol','state','days_in_trade','daily_moves']].to_string\\(\\)\\)\")"
     ]
   }
 }

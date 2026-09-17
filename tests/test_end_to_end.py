@@ -36,6 +36,7 @@ from breakout.paper.tracker import (
     compute_stop,
     compute_targets,
     insert_alert,
+    max_position_value,
     position_size,
     settle_one_trade,
 )
@@ -175,7 +176,16 @@ def test_full_pipeline_alerts_and_persists(tmp_path: Path) -> None:
         t1, t2 = compute_targets(
             entry, stop, top.base_height, cfg.paper_trading.target_1_r_multiple
         )
-        shares = position_size(cfg.risk.capital, cfg.risk.risk_per_trade_pct, entry, stop)
+        # The capital cap is part of sizing, not an afterthought: without it
+        # this setup's tight stop buys 648 shares, several times what the
+        # account could pay for.
+        shares = position_size(
+            cfg.risk.capital, cfg.risk.risk_per_trade_pct, entry, stop,
+            max_value=max_position_value(
+                cfg.risk.capital, cfg.risk.max_concurrent_positions
+            ),
+        )
+        assert shares * entry <= cfg.risk.capital / cfg.risk.max_concurrent_positions + entry
         assert shares > 0
 
         alert = Alert(

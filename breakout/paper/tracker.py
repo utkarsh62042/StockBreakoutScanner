@@ -33,6 +33,7 @@ from typing import Any
 import pandas as pd
 
 from breakout.config import Config
+from breakout.paper.costs import settle_pnl
 
 
 logger = logging.getLogger(__name__)
@@ -60,20 +61,50 @@ CLOSED_STATES = {
 # ── Math helpers ─────────────────────────────────────────────────────────
 
 
+def max_position_value(capital: float, max_concurrent_positions: int) -> float:
+    """The most one position may be worth, so a full book fits the account.
+
+    Derived from `max_concurrent_positions` rather than configured separately:
+    "8 concurrent positions" only means anything if eight of them fit, so at
+    ₹2,00,000 and 8 slots a position is capped at ₹25,000 and a full book is
+    exactly 100% of capital. One number, no way for two knobs to disagree.
+    """
+    return capital / max(1, max_concurrent_positions)
+
+
 def position_size(
     capital: float,
     risk_per_trade_pct: float,
     entry: float,
     stop: float,
+    max_value: float | None = None,
 ) -> int:
     """Return the integer share count that risks `risk_per_trade_pct` of
-    `capital` if `stop` is hit. Returns 0 if the trade has zero risk (which
-    would imply an entry at the stop — not a legitimate setup)."""
+    `capital` if `stop` is hit, subject to `max_value` of exposure.
+
+    Returns 0 if the trade has zero risk (which would imply an entry at the
+    stop — not a legitimate setup).
+
+    **`max_value` is not optional in practice.** Pure risk-based sizing has no
+    notion of what a position *costs*, only of what it can lose, and the two
+    diverge violently when the stop is tight:
+
+        position value = risk_amount / (stop distance as a fraction of price)
+
+    so a 2.5% stop with 2.5% capital risk buys exactly 100% of the account in a
+    single trade, and a tighter stop buys more than the account holds. Measured
+    on real setups before this cap existed, positions ran 62-133% of capital
+    each — on a strategy that intends to hold eight at once. The share counts
+    the scanner printed were not ones the account could have bought.
+    """
     risk_amount = capital * (risk_per_trade_pct / 100.0)
     risk_per_share = abs(entry - stop)
     if risk_per_share == 0:
         return 0
-    return int(risk_amount / risk_per_share)
+    shares = int(risk_amount / risk_per_share)
+    if max_value is not None and entry > 0:
+        shares = min(shares, int(max_value / entry))
+    return shares
 
 
 def compute_stop(breakout_level: float, atr: float, multiplier: float = 1.5) -> float:
@@ -175,6 +206,67 @@ def compute_daily_progress(
     return f"D{len(moves)}", ",".join(moves)
 
 
+# ── Excursions ──────────────────────────────────────────────────────────
+# `max_favorable` / `max_adverse` — the best and worst the position ever got to,
+# in R, at any point after entry. They have been in the schema and documented in
+# GUIDE § 12 since the start and were never written, which is a shame: they are
+# the cheapest way to find out whether the stop and target are in the right
+# place, and neither question is answerable from the realised P&L alone.
+#
+#   max_favorable 3.5R on a trade that exited at +2R  -> the target is too near
+#   max_adverse  -0.9R on a trade that went on to win -> the stop is too tight
+#
+# Measured in R (not rupees) so trades of different sizes compare directly, and
+# recomputed from cached bars on each settle rather than accumulated, so re-runs
+# stay idempotent.
+
+
+def compute_excursions(
+    entry_price: float | None,
+    stop_loss: float | None,
+    prices: pd.DataFrame,
+    entry_date: Any,
+    today: date | None = None,
+) -> tuple[float | None, float | None]:
+    """Return `(max_favorable_r, max_adverse_r)` for one trade.
+
+    Bars are taken strictly *after* the entry day: the entry bar's own high and
+    low mostly printed before the 3 PM fill, exactly as in `settle_one_trade`.
+    Returns `(None, None)` when there is nothing to measure yet.
+    """
+    if entry_price is None or stop_loss is None or entry_date is None or prices.empty:
+        return None, None
+    try:
+        entry_px = float(entry_price)
+        stop = float(stop_loss)
+        entry_day = pd.to_datetime(entry_date).date()
+    except (TypeError, ValueError):
+        return None, None
+    risk_per_share = abs(entry_px - stop)
+    if entry_px <= 0 or risk_per_share <= 0:
+        return None, None
+
+    bars = prices.sort_index()
+    days = pd.DatetimeIndex(bars.index).date
+    mask = days > entry_day
+    if today is not None:
+        mask = mask & (days <= today)
+    bars = bars[mask]
+    if bars.empty:
+        return None, None
+
+    highs = pd.to_numeric(bars["high"], errors="coerce").dropna()
+    lows = pd.to_numeric(bars["low"], errors="coerce").dropna()
+    if highs.empty or lows.empty:
+        return None, None
+
+    favorable = (float(highs.max()) - entry_px) / risk_per_share
+    adverse = (float(lows.min()) - entry_px) / risk_per_share
+    # Clamp at 0 in each direction: a position that never traded above entry has
+    # no favorable excursion, and "max adverse +0.3R" would be nonsense.
+    return max(0.0, favorable), min(0.0, adverse)
+
+
 # ── State transitions ───────────────────────────────────────────────────
 
 
@@ -189,8 +281,10 @@ class TradeOutcome:
     new_state: str
     exit_price: float | None = None
     exit_date: str | None = None
-    pnl_inr: float | None = None
-    pnl_r: float | None = None
+    pnl_inr: float | None = None        # net of transaction costs
+    pnl_r: float | None = None          # net of transaction costs
+    gross_pnl_inr: float | None = None  # before costs, so the drag is visible
+    costs_inr: float | None = None
     days_held: int | None = None
     notes: str = ""
 
@@ -240,35 +334,42 @@ def settle_one_trade(
     if days_held <= 0:
         return None
 
-    # 1. Stop hit
-    if today_low <= stop_loss:
-        exit_price = stop_loss  # conservative — assume fill at stop
-        pnl_inr = (exit_price - entry_price) * shares
-        pnl_r = (exit_price - entry_price) / max(1e-9, abs(entry_price - stop_loss))
+    def _close_at(exit_price: float, state: str, notes: str) -> TradeOutcome:
+        gross, costs_inr, net, net_r = settle_pnl(
+            entry_price, exit_price, shares, stop_loss, cfg.costs
+        )
         return TradeOutcome(
-            new_state=TradeState.STOPPED_OUT,
+            new_state=state,
             exit_price=exit_price,
             exit_date=today_iso,
-            pnl_inr=pnl_inr,
-            pnl_r=pnl_r,
+            pnl_inr=net,
+            pnl_r=net_r,
+            gross_pnl_inr=gross,
+            costs_inr=costs_inr,
             days_held=days_held,
-            notes="stop_hit_intraday",
+            notes=notes,
         )
 
-    # 2. Full target (target_2) hit
-    if target_2 is not None and today_high >= target_2:
-        exit_price = target_2
-        pnl_inr = (exit_price - entry_price) * shares
-        pnl_r = (exit_price - entry_price) / max(1e-9, abs(entry_price - stop_loss))
-        return TradeOutcome(
-            new_state=TradeState.TARGET_HIT,
-            exit_price=exit_price,
-            exit_date=today_iso,
-            pnl_inr=pnl_inr,
-            pnl_r=pnl_r,
-            days_held=days_held,
-            notes="target_2_hit",
+    # 1. Stop hit. A fill exactly at the stop is only available if the stop was
+    # reached during the session; if the bar OPENED below it the position gaps
+    # through and the real fill is the open. Gap-downs on bad news are the main
+    # source of the fat left tail on NSE, and assuming a fill at the stop
+    # overstates R on precisely the trades that hurt most.
+    if today_low <= stop_loss:
+        today_open = float(today_ohlc["open"])
+        exit_price = min(stop_loss, today_open)
+        gapped = today_open < stop_loss
+        return _close_at(
+            exit_price,
+            TradeState.STOPPED_OUT,
+            f"stop_gap_open:{exit_price:.2f}" if gapped else "stop_hit_intraday",
         )
+
+    # 2. Full target (target_2) hit. No mirror-image fix needed here: filling at
+    # the target when the bar opened above it understates the gain, which is the
+    # conservative direction.
+    if target_2 is not None and today_high >= target_2:
+        return _close_at(target_2, TradeState.TARGET_HIT, "target_2_hit")
 
     # 3. First target hit (partial) — only transition once
     if (
@@ -283,17 +384,10 @@ def settle_one_trade(
 
     # 4. Time exit
     if days_held >= cfg.paper_trading.hold_max_days:
-        exit_price = float(today_ohlc["close"])
-        pnl_inr = (exit_price - entry_price) * shares
-        pnl_r = (exit_price - entry_price) / max(1e-9, abs(entry_price - stop_loss))
-        return TradeOutcome(
-            new_state=TradeState.TIME_EXIT,
-            exit_price=exit_price,
-            exit_date=today_iso,
-            pnl_inr=pnl_inr,
-            pnl_r=pnl_r,
-            days_held=days_held,
-            notes=f"time_exit_after_{days_held}d",
+        return _close_at(
+            float(today_ohlc["close"]),
+            TradeState.TIME_EXIT,
+            f"time_exit_after_{days_held}d",
         )
 
     return None
@@ -315,6 +409,7 @@ def insert_alert(
     base_height: float,
     cfg: Config,
     alert_date: date | None = None,
+    risk_multiplier: float = 1.0,
 ) -> int:
     """Open a paper trade at the 3 PM pre-close confirmation price.
 
@@ -325,6 +420,12 @@ def insert_alert(
     R:R they imply) is measured from a fill that is actually obtainable.
 
     `breakout_level` still anchors the stop — see `compute_stop`.
+
+    `risk_multiplier` scales risk per trade for the market regime (see
+    `filters.regime`). It touches size only: the stop, the targets and the R:R
+    they imply are properties of the setup, not of the tape, so a half-size
+    position in a risk-off regime is still a 1R loss if it stops out — it just
+    costs half as many rupees.
     """
     alert_date = alert_date or date.today()
     entry = float(entry_price)
@@ -333,7 +434,13 @@ def insert_alert(
         entry, stop, base_height, cfg.paper_trading.target_1_r_multiple
     )
     shares = position_size(
-        cfg.risk.capital, cfg.risk.risk_per_trade_pct, entry, stop
+        cfg.risk.capital,
+        cfg.risk.risk_per_trade_pct * risk_multiplier,
+        entry,
+        stop,
+        max_value=max_position_value(
+            cfg.risk.capital, cfg.risk.max_concurrent_positions
+        ),
     )
     # How far above the level we had to pay. A large extension means the move
     # ran away intraday: risk per share is wider, so `shares` is already
@@ -359,6 +466,7 @@ def insert_alert(
                 f"breakout_level={breakout_level:.2f},"
                 f"entry_at_preclose={entry:.2f},"
                 f"extension={extension_pct:+.2f}%"
+                + (f",risk_x{risk_multiplier:.2f}" if risk_multiplier != 1.0 else "")
             ),
         }
     )
@@ -375,6 +483,10 @@ def apply_outcome(store: Any, trade_id: int, outcome: TradeOutcome) -> None:
         fields["pnl_inr"] = outcome.pnl_inr
     if outcome.pnl_r is not None:
         fields["pnl_r"] = outcome.pnl_r
+    if outcome.gross_pnl_inr is not None:
+        fields["gross_pnl_inr"] = outcome.gross_pnl_inr
+    if outcome.costs_inr is not None:
+        fields["costs_inr"] = outcome.costs_inr
     if outcome.days_held is not None:
         fields["days_held"] = outcome.days_held
     if outcome.notes:

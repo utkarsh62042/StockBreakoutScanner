@@ -5,15 +5,23 @@ stocks, illiquid names, and just-listed IPOs that pattern detectors would
 otherwise produce noise on.
 
 Inputs the filter expects (any may be None — missing fields default-pass
-with a warning rather than blocking the pipeline):
+rather than blocking the pipeline):
 
     market_cap_cr        : INR crores (1 cr = 10^7 INR)
     listing_date         : pd.Timestamp of first trading day
     promoter_pledge_pct  : 0-100, percentage of promoter holdings pledged
-                           [Phase 2 will wire this up; Phase 1 defaults pass.]
 
 Average daily turnover (ADV) is computed from the price/volume series
 directly, so it never relies on external metadata.
+
+**Default-pass is the dangerous part of this design.** A gate whose source is
+missing silently approves every symbol, which reads as protection you do not
+have. Per-symbol warnings are not the answer — they would fire 500 times a run
+and be tuned out — so the reporting lives in `filters.gate_audit`, which the
+morning scan logs once per run and which names every gate that is currently
+passing everything. As of 2026-09-12 `promoter_pledge` is genuinely inert
+(no source exists) while `market_cap` is merely redundant (NIFTY 500 membership
+implies a size floor ~20x this one). See that module for the measurements.
 """
 
 from __future__ import annotations
@@ -76,6 +84,9 @@ def check_quality(
         )
 
     # ── Market cap (from metadata, default-pass if absent) ───────────────
+    # Never fires in practice: NSE's constituent CSV carries no market cap, and
+    # even if it did, the smallest NIFTY 500 name measured ~10,000cr against a
+    # 500cr floor. Kept so the check exists if the universe ever widens.
     market_cap_cr = metadata.get("market_cap_cr")
     if market_cap_cr is not None and market_cap_cr < thresholds.min_market_cap_cr:
         reasons.append(
@@ -93,9 +104,12 @@ def check_quality(
                 f"too_recent_listing:{days_listed}d<{thresholds.min_listing_days}d"
             )
 
-    # ── Promoter pledge (Phase 2 will wire the source) ───────────────────
-    # When the source isn't connected yet, we cannot enforce the < 30% rule.
-    # Documented as a known deferral in MEMORY/project_overview.
+    # ── Promoter pledge ──────────────────────────────────────────────────
+    # INERT: no source is wired, so the < 30% rule is not enforced for anyone.
+    # Unlike market cap this one would reject real names if connected — index
+    # membership does not screen for pledging — so the gap is material. There is
+    # no free reliable feed (NSE publishes shareholding patterns as quarterly
+    # filings, not an API). Surfaced every run by `filters.gate_audit`.
     pledge_pct = metadata.get("promoter_pledge_pct")
     if pledge_pct is not None and pledge_pct >= 30.0:
         reasons.append(f"high_promoter_pledge:{pledge_pct:.1f}%")

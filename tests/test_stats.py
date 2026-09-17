@@ -48,5 +48,7 @@ def test_filter_period() -> None:
 
 def test_full_report_shape() -> None:
     rep = full_report([_t("A", 85, 2.0, 2000.0)], {"A": "IT"})
-    assert set(rep) == {"overall", "by_pattern", "by_score_band", "by_sector"}
+    assert set(rep) == {
+        "overall", "by_pattern", "by_score_band", "by_sector", "by_feature",
+    }
     assert rep["overall"].n == 1

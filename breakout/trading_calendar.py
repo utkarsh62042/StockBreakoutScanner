@@ -10,7 +10,7 @@ point `load_holidays` at a text file of ISO dates (one per line).
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,43 @@ def require_trading_day(d: date, holidays: set[date] | None = None) -> bool:
         return True
     logger.info(f"{d} is not an NSE trading day (weekend/holiday) — skipping")
     return False
+
+
+def previous_trading_day(d: date, holidays: set[date] | None = None) -> date:
+    """The most recent trading day strictly before `d`.
+
+    Walks backwards a day at a time; the bound of 10 is well clear of the
+    longest run of NSE closures (a holiday adjoining a weekend) and stops a bad
+    holidays file from looping forever.
+    """
+    holidays = active_holidays() if holidays is None else holidays
+    cur = d
+    for _ in range(10):
+        cur = cur - timedelta(days=1)
+        if is_trading_day(cur, holidays):
+            return cur
+    return d - timedelta(days=1)
+
+
+def last_completed_session(
+    now=None, holidays: set[date] | None = None
+) -> date:
+    """The latest trading day whose bar is finished.
+
+    Today once the close has passed, otherwise the previous trading day. This is
+    the date a *settled* bar should carry, and so the yardstick for whether a
+    symbol's cached data is fresh enough to analyse — "is the latest bar today?"
+    is the wrong question before 3:30 PM, when today's bar is still being
+    written and is deliberately excluded from the morning scan.
+    """
+    from breakout.analysis.session import SESSION_CLOSE, now_ist
+
+    now = now or now_ist()
+    holidays = active_holidays() if holidays is None else holidays
+    today = now.date()
+    if is_trading_day(today, holidays) and now.time() >= SESSION_CLOSE:
+        return today
+    return previous_trading_day(today, holidays)
 
 
 def parse_nse_holidays(payload: dict) -> list[date]:

@@ -12,6 +12,7 @@ or another working directory.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,9 @@ class RiskConfig:
     capital: float
     risk_per_trade_pct: float
     max_concurrent_positions: int
+    # Breakouts cluster by sector, so without this eight positions can be one
+    # bet. Defaulted for configs written before the cap existed.
+    max_positions_per_sector: int = 3
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,14 @@ class Thresholds:
     near_breakout_pct: float
     pullback_window_days: int
     pullback_retest_band_pct: float
+    # Where the volume score maxes out. Defaulted so a config.yaml written
+    # before the scale was widened still loads.
+    volume_saturation_ratio: float = 3.0
+    # Chase penalty — how far above the breakout level the entry may print
+    # before the score starts docking points. See `scoring.extension_penalty`.
+    extension_free_pct: float = 2.0
+    extension_max_pct: float = 8.0
+    extension_max_penalty: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -81,9 +93,52 @@ class OutputConfig:
 class PaperTradingConfig:
     enabled: bool
     hold_max_days: int
-    alert_ttl_days: int
     atr_stop_multiplier: float
     target_1_r_multiple: float
+    # `alert_ttl_days` was removed 2026-09-12. It governed ALERTED -> CANCELED
+    # under the old next-day-open entry model; since trades open as ENTERED at
+    # the 3 PM confirmation there is no waiting period for it to expire, and it
+    # had no call site. A leftover key in config.yaml is dropped with a warning
+    # rather than crashing the load — see `_known_fields`.
+
+
+@dataclass(frozen=True)
+class RegimeConfig:
+    """Market-regime gate — see `breakout.filters.regime`.
+
+    The thresholds are priors. `regime` and `breadth_pct` are logged per alert,
+    so they can be re-set from realised outcomes once the sample supports it.
+    """
+
+    enabled: bool = True
+    nifty_symbol: str = "^NSEI"
+    nifty_sma: int = 200
+    nifty_slope_lookback: int = 20
+    breadth_sma: int = 50
+    breadth_up_pct: float = 60.0
+    breadth_down_pct: float = 40.0
+    risk_off_multiplier: float = 0.5
+    severe_multiplier: float = 0.25
+
+
+@dataclass(frozen=True)
+class CostsConfig:
+    """Round-trip transaction costs — see `breakout.paper.costs`.
+
+    All rates are percentages of turnover for one leg. Defaults match the NSE
+    equity-delivery schedule; only `brokerage_*` and `slippage_pct` are
+    broker/execution specific.
+    """
+
+    enabled: bool = True
+    brokerage_pct: float = 0.1
+    brokerage_max_inr: float = 20.0
+    stt_pct: float = 0.1
+    exchange_txn_pct: float = 0.00297
+    sebi_turnover_pct: float = 0.0001
+    stamp_duty_pct: float = 0.015
+    gst_pct: float = 18.0
+    slippage_pct: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -147,7 +202,35 @@ class Config:
     paths: PathsConfig
     logging: LoggingConfig
     credentials: Credentials
+    # Defaulted so a config.yaml written before the `costs:` block existed
+    # still loads — with costs on, at the standard NSE rates.
+    costs: CostsConfig = field(default_factory=CostsConfig)
+    regime: RegimeConfig = field(default_factory=RegimeConfig)
     project_root: Path = field(default=PROJECT_ROOT)
+
+
+def _known_fields(cls, raw: dict | None, section: str) -> dict:
+    """Filter `raw` to the fields `cls` actually declares.
+
+    Without this, a key left in `config.yaml` after a setting is retired blows
+    up the whole load with an opaque `TypeError: unexpected keyword argument`.
+    Unknown keys are dropped with a warning rather than silently — a dropped key
+    is usually a retired setting, but it is occasionally a typo, and a typo that
+    vanishes without a word is how a threshold quietly stops applying.
+    """
+    import warnings
+
+    fields = {f.name for f in dataclasses.fields(cls)}
+    data = dict(raw or {})
+    unknown = sorted(set(data) - fields)
+    if unknown:
+        warnings.warn(
+            f"config.yaml: ignoring unknown key(s) under `{section}`: "
+            f"{', '.join(unknown)}. Retired settings can be deleted; anything "
+            f"else is probably a typo and is NOT being applied.",
+            stacklevel=2,
+        )
+    return {k: v for k, v in data.items() if k in fields}
 
 
 def _resolve_path(p: str, root: Path) -> Path:
@@ -212,17 +295,29 @@ def load_config(config_path: Path | str | None = None) -> Config:
     return Config(
         universe=raw["universe"],
         data_source=raw["data_source"],
-        risk=RiskConfig(**raw["risk"]),
-        scoring_weights=ScoringWeights(**raw["scoring_weights"]),
-        thresholds=Thresholds(**raw["thresholds"]),
-        pivots=PivotConfig(**raw["pivots"]),
-        patterns=PatternsConfig(**raw["patterns"]),
-        stage_filter=StageFilterConfig(**raw["stage_filter"]),
-        output=OutputConfig(**raw["output"]),
-        paper_trading=PaperTradingConfig(**raw["paper_trading"]),
+        risk=RiskConfig(**_known_fields(RiskConfig, raw["risk"], "risk")),
+        scoring_weights=ScoringWeights(
+            **_known_fields(ScoringWeights, raw["scoring_weights"], "scoring_weights")
+        ),
+        thresholds=Thresholds(
+            **_known_fields(Thresholds, raw["thresholds"], "thresholds")
+        ),
+        pivots=PivotConfig(**_known_fields(PivotConfig, raw["pivots"], "pivots")),
+        patterns=PatternsConfig(
+            **_known_fields(PatternsConfig, raw["patterns"], "patterns")
+        ),
+        stage_filter=StageFilterConfig(
+            **_known_fields(StageFilterConfig, raw["stage_filter"], "stage_filter")
+        ),
+        output=OutputConfig(**_known_fields(OutputConfig, raw["output"], "output")),
+        paper_trading=PaperTradingConfig(
+            **_known_fields(PaperTradingConfig, raw["paper_trading"], "paper_trading")
+        ),
         paths=paths,
-        logging=LoggingConfig(**raw["logging"]),
+        logging=LoggingConfig(**_known_fields(LoggingConfig, raw["logging"], "logging")),
         credentials=creds,
+        costs=CostsConfig(**_known_fields(CostsConfig, raw.get("costs"), "costs")),
+        regime=RegimeConfig(**_known_fields(RegimeConfig, raw.get("regime"), "regime")),
     )
 
 

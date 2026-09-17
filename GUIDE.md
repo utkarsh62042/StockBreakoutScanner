@@ -279,9 +279,10 @@ BreakoutStockAnalyser/
 | `breakout/config.py` | Reads `config.yaml` + `.env`, returns a frozen typed `Config` object the rest of the codebase accesses by attribute. |
 | `breakout/logging_setup.py` | Configures Python's logging to write DEBUG to `logs/YYYY-MM-DD.log` and INFO to a colored rich console. |
 | `breakout/scoring.py` | `composite_score(features)` — 0–100 score from quality/stage/pattern/volume/RS/tightness/sector inputs. Returns 0 if any hard gate fails. |
-| `breakout/data/store.py` | `Store(workbook_path)` — every read/write to the Excel workbook goes through here. Use as a context manager (flushes on exit). |
+| `breakout/data/store.py` | `Store(workbook_path)` — every read/write to the Excel workbook goes through here. Use as a context manager (flushes on exit). `upsert_prices` also keeps the cache on a single adjustment basis: when the feed re-adjusts a symbol it scales the cached bars, and the levels on that symbol's open paper trades, by the measured factor. |
 | `breakout/data/universe.py` | `refresh_universe_if_stale(store)` — downloads NIFTY 500 CSV from NSE if cache is >7 days old. |
 | `breakout/data/fetcher.py` | `make_fetcher(cfg)` returns YFinance or AngelOne based on config + credential availability. Both implement `fetch_history(symbol, days)` and `fetch_history_batch(symbols, days)`. Prefer the batch call in loops — YFinance overrides it to fetch ~50 tickers per HTTP request (8x faster over a full universe). **Angel One is disabled as of 2026-09** — its `getCandleData` returns AB1021 "Too many requests" even at 8s spacing (server-side bug on their end, see the fetcher docstring). |
+| `breakout/data/validate.py` | `is_continuous(df, symbol)` — rejects a price series containing an implausible one-day move. Catches demergers and capital reductions, which Yahoo does **not** adjust for (splits and bonuses it does handle). All three jobs skip a symbol that fails. |
 | `breakout/analysis/pivots.py` | `find_pivots(df, n=5)` — confirmed swing highs and swing lows. Every pattern depends on this being right. |
 | `breakout/analysis/indicators.py` | Pure functions: `sma`, `ema`, `rsi`, `atr`, `macd`, `bollinger_bands`, `adx`, `volume_ratio`. Plus `add_standard_indicators(df)` attaches all of them as columns. |
 | `breakout/analysis/patterns.py` | `detect_fifty_two_week_high_breakout`, `detect_darvas_box`, `detect_nr7`. Plus `detect_all(df, enabled)` runs the enabled set and returns matches sorted by confidence. |
@@ -346,6 +347,34 @@ Implementation uses Wilder's smoothing (the standard for ATR, matches TradingVie
 `adx(df, period=14)` — measures trend strength regardless of direction. >25 = strong trend.
 
 **Why:** Logged for context. Used in Phase 2 to filter out range-bound stocks for trend-following patterns.
+
+### Partial sessions and the intraday volume profile
+
+Both scans compare *today's* volume against a 20-day average of *complete* days. While today's bar is still being written that is apples-to-oranges, and biased one way only — the partial bar is always too small, so the 1.5× gate is harder to clear than configured and the volume score reads low.
+
+The obvious correction, scaling by elapsed clock time, is wrong. NSE volume is U-shaped: heavy at the open, heavy into the close, thin through the middle. Measured over **276 symbol-days of 5-minute bars across 12 large NSE names** (2026-09-12):
+
+| Time | Measured | Clock time |
+|---|---|---|
+| 09:30 | 0.039 | 0.040 |
+| 10:30 | 0.181 | 0.200 |
+| 11:30 | 0.316 | 0.360 |
+| 12:30 | 0.471 | 0.520 |
+| 13:30 | 0.609 | 0.680 |
+| 14:30 | 0.747 | 0.840 |
+| **15:00** | **0.851** | **0.920** |
+| 15:30 | 1.000 | 1.000 |
+
+The closing half hour carries ~15% of the day's volume in 8% of its minutes, and clock time overstates progress all session long. At 3 PM it claims 92% when the truth is 85% — so **a genuine 1.5× volume day read as 1.27× and failed the gate.**
+
+The two scans need opposite treatments, because the same correction is not safe at both ends:
+
+- **Pre-close (3:00 PM, ~85% done)** — project today's volume to a full-day estimate by dividing by the profile fraction. 85% is a stable base, and the projected figure ("tracking toward 2.1× average") is the one a trader would reason about. After the close, or on a settled bar, this is a no-op.
+- **Morning (9:30 AM, ~4% done)** — **drop the partial bar entirely**. Projecting from 4% multiplies whatever the opening fifteen minutes happened to do by ~26, which amplifies noise rather than removing bias. Left in, every candidate's volume ratio read as ~0.04× and its score was dragged down for no reason but the clock. The morning scan judges setups on completed history; the pre-close scan does the real volume check.
+
+`MIN_PROJECTABLE_FRACTION` (0.5) is the cutoff between the two behaviours.
+
+These are medians over liquid large caps. A thin name's profile will differ and the numbers will drift with market structure — they're a far better estimate than the implicit 1.00 the code used before, not a precise constant. `analysis/session.py` also pins the session clock to **Asia/Kolkata** regardless of the machine's timezone, which is a down payment on the broader timezone item (`IMPROVEMENTS.md` #13).
 
 ### Volume Ratio
 
@@ -538,6 +567,36 @@ Concretely: in our test runs with NIFTY large-caps in the current correction, on
 
 ## 10. Gates and filters
 
+### Which gates actually do anything (`breakout/filters/gate_audit.py`)
+
+Read this before trusting the list below. Several of the hard filters pass every symbol, and until 2026-09-12 nothing said so — they read as active in `config.yaml` and in this guide. **A gate that quietly approves everything is worse than no gate: it reads as protection you do not have.**
+
+The morning scan now logs a gate audit every run, classifying each filter:
+
+| State | Meaning |
+|---|---|
+| `ACTIVE` | can and does reject symbols |
+| `INERT` | configured, but has no data to act on — a missing source, not a design choice |
+| `REDUNDANT` | works, but something upstream already guarantees it; it can never be the reason a symbol is rejected |
+
+As measured on 2026-09-12 against the live universe:
+
+```
+ACTIVE    adv                rejected 4/500 (0.8%) below 5cr
+REDUNDANT market_cap         NIFTY 500 membership already implies far more than 500cr
+REDUNDANT listing_age        the 200-bar history requirement already excludes new listings
+INERT     promoter_pledge    no source wired — passes every symbol
+INERT     earnings_blackout  0/58 symbols returned any earnings date
+-> 2 gate(s) INERT. These pass every symbol; treat the protection they imply as absent.
+```
+
+The distinction between INERT and REDUNDANT is the useful part:
+
+- **`market_cap` is redundant, not broken.** The 15 lowest-turnover NIFTY 500 names have market caps from **₹10,052 cr** up — twenty times the ₹500 cr floor. Wiring a market-cap source would be pure cost for zero effect. Nothing to fix.
+- **`promoter_pledge` is genuinely inert, and it matters.** Unlike market cap, it *would* reject real names if connected — index membership does not screen for pledging. There is no free reliable feed (NSE publishes shareholding patterns as quarterly filings, not an API), so this is a real, unpatched hole.
+- **`earnings_blackout` is inert** because yfinance has no NSE earnings coverage. Needs an Indian source.
+- **`adv` works but barely binds.** Median ADV across the universe is ₹83 cr against a ₹5 cr floor, and the thinnest constituent trades ₹3.3 cr/day — over 100× the largest position the capital cap permits. It's a cheap safety rail against a thin name entering the index, not a liquidity constraint — keep it, but don't imagine it's protecting your fills.
+
 ### Quality floor (`breakout/filters/quality.py`)
 
 Hard gate: a stock either passes or fails. Reasons for failure:
@@ -552,9 +611,79 @@ ADV is computed directly from the price/volume data, no metadata needed. The oth
 
 Exclude stocks within ±5 trading days of an earnings announcement. Patterns get disrupted by news events; breakouts on earnings day are not the breakouts this strategy is built for. Default-pass in Phase 1 (no source wired yet).
 
-### Market mood (Phase 2)
+### Data freshness
 
-When India VIX is above its 90-day SMA, breakout patterns historically fail more often. Phase 2 will optionally gate alerts on this. Currently no gate.
+A symbol whose fetch failed keeps whatever is already in the cache. The morning scan used to decide *which* symbols to fetch before fetching them and then scan the whole universe regardless — so a failed fetch meant a symbol was analysed against prices days old, and could emit a breakout "signal" from them.
+
+Freshness is now re-checked **after** the fetch, and stale symbols are excluded from both the scan and the RS cross-section. The cross-section matters as much as the scan: a symbol frozen at last week's price carries a stale 63-day return, which distorts every *other* symbol's RS percentile.
+
+The subtlety is what "fresh" means, and it differs by job:
+
+| Job | Requirement | Why |
+|---|---|---|
+| `morning_scan` (9:30) | latest bar ≥ **last completed session** | Today's bar is still being written and is deliberately excluded (§ 6). Requiring "a bar for today" here would reject the entire universe. |
+| `preclose_scan` (3:00) | latest bar **is today** | It is asking "did this break out *today*" — yesterday's close cannot answer that, and confirming against it would open a position on a move that may already be over. |
+| `eod_settle` (4:00) | latest bar **is today** | Already enforced; settling against a stale bar would fabricate transitions. |
+
+`trading_calendar.last_completed_session()` is the yardstick: today once the close has passed, otherwise the previous trading day, skipping weekends and holidays. It reads the clock in **Asia/Kolkata**, so a scheduler running in another timezone can't mislabel yesterday's bar as today's.
+
+Measured against the live cache on 2026-09-12: 493 of 500 symbols fresh, 7 excluded (frozen a day behind after failed fetches) — those seven are precisely the ones that were previously being scanned against old prices.
+
+### Price continuity (`breakout/data/validate.py`)
+
+Hard gate, applied in all three jobs before anything else looks at the bars. A
+series containing an implausible one-day close-to-close move (below −25% or
+above +40%) is skipped entirely.
+
+The target is **demergers and capital reductions**. yfinance back-adjusts splits
+and bonuses for us, but Yahoo has no split record for a demerger, so the price
+drop stays in the series looking like a day's trading. On the live NIFTY 500
+cache that hit VEDL (−65%), ABFRL (−67%), TMPV (−40%), TRENT (−33%) and HEG
+(−63%) — five symbols whose 52-week high, base structure, ATR-derived stop, SMA
+slope and RS return were all being computed across a price cliff. Refetching
+does not clear them; only excluding them does.
+
+The band deliberately over-rejects: a genuine crash (INDUSINDBK −27% in March
+2025, IEX −30% on market-coupling news) trips it too, and no threshold can
+separate the two because demerger ratios are arbitrary. That costs nothing real
+— a stock that just fell 27% in a day will not pass the Stage 2 gate for months
+— and the exclusion lapses on its own once the bar ages out of the 300-day
+window.
+
+In the morning scan the check runs in the RS pre-pass, not just the main loop:
+a −65% phantom return would otherwise drag the percentile of **every other**
+symbol in the cross-section.
+
+### Market mood
+
+India VIX is logged per alert (`vix`, `market_mood`) and feeds one of the three regime votes below. On its own it is advisory — the morning scan warns when VIX is elevated but does not block.
+
+### Market regime (`breakout/filters/regime.py`)
+
+Breakout strategies concentrate nearly all their losses in risk-off regimes — the same setup that works in a broad advance fails repeatedly when the index is below a falling 200DMA and participation is narrowing. Three independent reads of "is the market paying for breakouts right now?", each voting −1 / 0 / +1:
+
+| Vote | Source | +1 | −1 |
+|---|---|---|---|
+| `nifty` | ^NSEI close vs its 200DMA | above a rising 200DMA | below a falling one |
+| `breadth` | % of universe above its own 50DMA | ≥ 60% | ≤ 40% |
+| `vix` | India VIX vs its 20-day average | `risk_on` | `risk_off` |
+
+The sum lands in [−3, +3]: **≥ +2 risk_on**, **≤ −2 risk_off**, else neutral. Breadth is free — the morning scan already reads every symbol's history for the RS pre-pass, so counting 50DMA positions costs nothing extra.
+
+**What it does:** scales `risk_per_trade_pct` at entry. Risk-off → 0.5×, all-three-negative → 0.25×, everything else → 1.0×. It never raises size above baseline — there's no evidence yet that risk-on days deserve more, and inventing upside is how a filter becomes a leverage knob.
+
+**Why a multiplier and not an on/off switch** — two reasons, and the first is the important one:
+
+1. A hard gate discards exactly the observations that would tell you whether the gate was right. Sizing down keeps the alert, the paper trade and the `alert_features` row, so `regime`, `regime_score` and `breadth_pct` accumulate against realised `pnl_r` and the thresholds can later be set from results rather than from the priors they are today. `python -m breakout.paper.stats` buckets them.
+2. Regime is a continuum. Half size in a deteriorating tape models what a discretionary trader actually does better than a binary halt.
+
+Sizing is all it touches: stop, targets and the R:R they imply are properties of the setup, not of the tape. A half-size trade that stops out is still exactly −1R, it just costs half as many rupees. Reduced-size entries are marked `risk_x0.50` in the trade's `notes`.
+
+The assessment runs once per morning (breadth needs the whole universe) and rides on every `setup_watchlist` row; the pre-close scan reads it back rather than recomputing. Rows written before this existed size at 1.0, as does a failed ^NSEI fetch — a data gap is not evidence of a bad tape.
+
+Set `regime.enabled: false` to keep measuring the regime without acting on it.
+
+> The backtest does **not** apply this gate — it would need point-in-time breadth across the universe. See `IMPROVEMENTS.md` § 11 for why the backtest is a smoke test rather than an edge estimate.
 
 ---
 
@@ -571,22 +700,32 @@ def composite_score(features: ScoringFeatures) -> float:
     
     return (
         features.pattern_match.confidence * 0.35      # max 35
-        + 20                                          # Stage 2 (gated above)
+        + 15                                          # Stage 2 (gated above)
         + min(15, features.rs_score)                  # max 15
-        + min(15, features.volume_ratio / 1.5 * 15)   # max 15
+        + volume_points(features.volume_ratio)        # max 15 — see below
+        + close_in_range_points(features.close_in_range)   # max 5 — see below
         + min(10, features.tightness_score * 10)      # max 10
         + {"up": 5, "flat": 3, "down": 0}.get(features.sector_trend, 3)  # max 5
-    )
+        - extension_penalty(features.extension_pct)   # max 10 off — see below
+    )   # floored at 0
 ```
 
 ### Why these weights
 
 - **Pattern quality 35%** — biggest contributor. A confident pattern (e.g., a clean Darvas with 6 touches) is much more reliable than a barely-detected one.
-- **Stage 20%** — second-biggest. Already a hard gate; the points reward you for being in the right environment.
+- **Stage 15%** — already a hard gate; the points reward you for being in the right environment. Was 20; 5 points moved to close-in-range below, because a constant awarded to every candidate that passes a gate carries no information.
 - **Relative strength 15%** — a stock outperforming the market is in demand. Often the best Stage-2 advances come from RS leaders.
 - **Volume 15%** — confirms institutional participation. Without it, even a clean pattern is "retail interest" only.
+  
+  The scale is piecewise-linear with a knee at the confirmation gate: **0× → 0 pts, 1.5× → 7.5 pts, 3.0× → 15 pts**, capped beyond. Half weight at the gate rather than zero, because clearing the gate is itself evidence; capped at 3× because a 10× spike is usually news, not accumulation. Continuous at the knee, so a candidate crossing 1.5× doesn't lurch in the ranking, and still ranked below it so the morning watchlist (where nothing has broken out yet) can order candidates. `thresholds.volume_saturation_ratio` tunes the top end.
 - **Tightness 10%** — pre-breakout compression. Important but secondary; many patterns work without it.
+- **Close-in-range 5%** — where the confirmation bar closed within its own high-low range (0 = at the low, 1 = at the high). This is the direct measurement of the thesis in § 2: *institutional commitment shows in the close*. `close > level` treats a breakout that finished on its high identically to one that spent the day at the level and closed near its low having given back everything it gained.
+
+  Unknown scores the **full** 5, not zero and not a midpoint: the morning scan has no breakout bar to judge, and anything else would shift every watchlist score for no informational reason. So a strong close scores exactly what it did before this component existed, and only a weak close gives ground.
 - **Sector 5%** — small modifier. A rising sector helps but isn't decisive.
+- **Chase penalty, up to −10** — the only negative term. By 3 PM a breakout has usually already run past its pivot, and how far matters: the stop is anchored to the *level*, so a wider extension means wider risk per share and a smaller position, and `target_2` is a measured move from the level, so extension eats directly into reachable upside. Free up to 2%, ramping to the full −10 at 8%, capped beyond (a 40% extension shouldn't swamp everything else). Entering *below* the level — the pullback path — is never penalised, and neither is an unknown extension: the morning scan has no entry yet, and absence of data isn't evidence of a chase.
+
+  A scored penalty rather than a hard "reject above 5%", for the same reason the regime gate sizes down rather than blocking: a rejected alert leaves no `alert_features` row, so a hard cut would destroy the evidence needed to find the real cut point. In practice the penalty plus `min_score_to_alert` acts as a soft gate — a badly extended entry simply stops clearing the bar. The score is floored at 0, since 0 is reserved for "failed a hard gate"; a chased entry is a weak setup, not a disqualified one.
 
 ### Thresholds
 
@@ -595,18 +734,88 @@ def composite_score(features: ScoringFeatures) -> float:
 | Watchlist threshold | `morning_scan` — anything ≥ this goes on `setup_watchlist` | 50 |
 | Alert threshold | `preclose_scan` — must score ≥ this *and* confirm breakout to alert | 60 (`min_score_to_alert` in config) |
 
-The 10-point buffer between watchlist (50) and alert (60) accounts for the volume boost that comes on actual breakout day. A stock can sit at 55 on the watchlist (moderate volume), then jump to 75 if today's volume spikes to 3× average.
+The 10-point buffer between watchlist (50) and alert (60) accounts for the volume boost that comes on actual breakout day. A stock can sit at 55 on the watchlist (moderate volume), then climb as today's volume spikes — now genuinely so: under the widened volume scale, going from 1.0× to 3.0× is worth +10 points, where before the two scored within 5 of each other and anything ≥1.5× was identical.
 
-In Phase 1, with RS / tightness / sector stubbed to 0, the practical max score is:
-- Pattern 35 + Stage 20 + Volume 15 + Sector (flat) 3 = **73**
+The pre-close rescore calls `composite_score` again over the features the
+morning stored, with the confirmation day's volume substituted in. It used to
+patch the score arithmetically (add the new volume term, subtract an assumed-1.0
+one), which was close but drifted from the scorer whenever a weight changed.
 
-So Phase 1 alerts cluster between 50 and 73. Phase 2's additional signals open up the 73–100 range for genuinely standout setups.
+### Known limits of these weights
+
+Worth knowing before you trust the number:
+
+- **Stage contributes no discrimination.** It's a hard gate, so every scored
+  candidate gets exactly 15 (was 20 — the other 5 became close-in-range, which
+  does discriminate). It still shifts all scores up by a constant; `60` is
+  really "≈45 points of varying signal".
+- **`atr_pct` is logged but deliberately still unscored.** Unlike
+  close-in-range it has no agreed direction — high volatility is either the
+  fuel for a fast move or the noise that shakes you out, and which one depends
+  on the name. It is also already priced in twice over: the stop is
+  `1.5 × ATR` below the level, so a volatile stock automatically gets a wider
+  stop and a smaller position. Scoring it today would mean inventing a sign.
+  It stays in `alert_features` until the sample says which way it points.
+- ~~**Volume saturates at the confirmation gate.**~~ Fixed — the scale now runs
+  1.5× → 3.0× (see above). A breakout that only just clears the gate scores
+  **7.5 points lower than it used to**, when volume was a free 15 for everyone,
+  so the effective floor for a confirmed alert fell from 38 to 30.5 and `60` is
+  correspondingly harder to clear. Expect fewer alerts until
+  `min_score_to_alert` is re-tuned against results.
+- **Ranking is still driven substantially by pattern confidence**, whose
+  baselines are detector-specific (52w starts at 50, Darvas at 60, NR7 at 50) —
+  i.e. partly by *which* detector fired rather than how good the setup is.
+  Volume now competes with it for influence, which it did not before.
+- ~~**Extension past the pivot is recorded but unscored.**~~ Fixed — it now
+  carries a penalty of up to −10 (see above).
+
+**How much these two fixes changed the number.** For one mid-quality setup
+(pattern confidence 60, RS 7.5, tightness 0.5, flat sector), the old score was
+**71.5 in every one of these cases** — volume and extension were doing no work
+at all:
+
+| vol ratio | extension | old | new | alerts at 60? |
+|---|---|---|---|---|
+| 1.5× | 1% | 71.5 | 64.0 | yes → yes |
+| 1.5× | 5% | 71.5 | 59.0 | yes → **no** |
+| 1.5× | 8% | 71.5 | 54.0 | yes → **no** |
+| 2.0× | 5% | 71.5 | 61.5 | yes → yes |
+| 3.0× | 1% | 71.5 | 71.5 | yes → yes |
+| 3.0× | 8% | 71.5 | 61.5 | yes → yes |
+
+Only a 3× breakout taken within 2% of its pivot keeps the old score. Everything
+else is now ranked below it, and weak-volume-plus-big-chase drops out
+altogether. **Expect meaningfully fewer alerts** until `min_score_to_alert` is
+re-tuned against results.
+
+None of these are fixed by re-guessing the weights. `alert_features` plus
+`python -m breakout.paper.stats` is the path to settling them with data.
+
+Historical note: in Phase 1, with RS / tightness / sector stubbed to 0, the practical max was Pattern 35 + Stage 20 + Volume 15 + Sector (flat) 3 = **73**, so alerts clustered between 50 and 73. All six signals are live now, and the volume and extension terms are no longer inert, so the working range is much wider — see the before/after table above.
 
 ---
 
 ## 12. Paper trading
 
 `breakout/paper/tracker.py`. Every alert becomes a virtual position. After 4–6 weeks of running, the `paper_trades` table answers: *what's my actual edge?*
+
+### The backtest is a smoke test, not evidence
+
+`python -m breakout.backtest` prints a win rate, an average R and a profit factor. **Those numbers are not an edge estimate, and sizing real capital on them would be a mistake.** The command prints this warning under its own output every run, so it can't be read without it.
+
+What it is good for: confirming the pipeline still fires and settles trades the way it did last week — a regression check on detector wiring.
+
+Why the numbers can't be trusted as performance:
+
+1. **Survivorship.** It replays *today's* NIFTY 500 over history, so every name in the sample survived and stayed in the index; the ones that collapsed out of it are absent. Inflates results, and not cheaply fixable — historical index membership isn't freely available (`IMPROVEMENTS.md` #15).
+2. **Non-overlapping trades.** After a trade closes the scan resumes past its exit, discarding any signal that fired while a position was held. The sample is biased toward periods following quick exits.
+3. **No RS or sector.** Both need the whole universe as of each historical day, so they score 0 and 'flat'. Backtest scores therefore sit *below* live scores — a setup that clears `min_score_to_alert` live may not clear it here.
+4. **No regime gate.** Needs point-in-time breadth across the universe.
+5. **No concentration limits.** Every signal is taken; the live scanner caps total and per-sector positions and would not have taken them all.
+
+Costs, gap-through-stop fills and the capital cap on position size *are* modelled and match the live tracker exactly.
+
+**The forward paper-trade log is the edge estimate.** That's what § 12 is about, and it's the only measurement here made in the current regime with the current logic.
 
 ### Why paper trade
 
@@ -624,11 +833,8 @@ If win rate is > 50% and average R is > +0.5, the strategy has a real edge in cu
 ### The state machine
 
 ```
-ALERTED
-   │
-   ├── (next trading day at open) ──→ ENTERED
-   │
-   └── (>= alert_ttl_days with no confirmation) ──→ CANCELED
+(pre-close scan confirms a breakout) ──→ ENTERED
+   │        opened at the 3 PM price, immediately — there is no waiting state
 
 ENTERED
    │
@@ -644,6 +850,8 @@ TARGET_1_HIT  (partial — stop now at breakeven)
    └── (days_held ≥ hold_max_days) ──→ TIME_EXIT
 ```
 
+`ALERTED` and `CANCELED` are legacy states from the old next-day-open entry model. Nothing produces them any more; existing rows in `ALERTED` are skipped by the settle rather than crashing it.
+
 ### Position sizing
 
 `position_size(capital, risk_pct, entry, stop)`:
@@ -657,6 +865,53 @@ shares = floor(risk_amount / risk_per_share)
 For your config: ₹2,00,000 × 2.5% = ₹5,000 risk per trade. If a stock has entry ₹500 and stop ₹485 (risk ₹15/share), you'd take 5000 / 15 ≈ 333 shares.
 
 This is **risk-based sizing**, not equal-rupee sizing. Every position risks the same amount if the stop hits — wider stops = fewer shares, tighter stops = more shares. The key property is that your maximum loss per trade is consistent regardless of the stock's price or volatility.
+
+#### The capital cap — and why risk sizing alone is dangerous
+
+Look again at that example: 333 shares at ₹500 is **₹1,66,500**, or 83% of the whole account, in one position. That is not a quirk of the numbers chosen. Risk-based sizing knows what a position can *lose*, not what it *costs*, and the identity is unforgiving:
+
+```
+position value = risk_amount / (stop distance as a fraction of price)
+```
+
+A 2.5% stop with 2.5% capital risk buys **exactly 100% of the account** in a single trade. Anything tighter buys more than the account holds.
+
+This was live until 2026-09-12. Measured across 94 real setups from cached prices:
+
+| | |
+|---|---|
+| median position | **85% of capital** |
+| mean | 96.5% |
+| exceeded 100% of capital | **30 of 94** |
+| exceeded 25% of capital | **94 of 94** |
+| largest | **₹6,84,607** on a ₹2,00,000 account (342%) |
+
+The worst case was a GRASIM entry at ₹3,140 with the stop ₹23 below it — a 0.7% stop, so risk sizing bought 218 shares. The share counts the scanner printed in alerts were not ones the account could have paid for, and `insert_alert` used the same function, so the paper log was recording impossible positions.
+
+`position_size()` now takes `max_value`, and `max_position_value(capital, max_concurrent_positions)` supplies it: **capital ÷ slots**, so ₹25,000 at ₹2L and 8 positions, and a full book is exactly 100% of capital. Derived from `max_concurrent_positions` rather than configured separately — "8 concurrent positions" only means something if eight of them fit, and one number can't disagree with itself.
+
+The cap is a ceiling, not a replacement: below it, risk-based sizing still governs, so a wider stop still buys fewer shares.
+
+### Concentration limits
+
+Two caps, both applied at entry in `preclose_scan` via `filters/concentration.py`:
+
+| Limit | Default | What it stops |
+|---|---|---|
+| `risk.max_concurrent_positions` | 8 | total open positions |
+| `risk.max_positions_per_sector` | 3 | open positions sharing a sector |
+
+`max_concurrent_positions` was in `config.yaml` and parsed into `Config` from the beginning, but **had no call site** — nothing read it, so the scanner opened every breakout it confirmed. 2.5% risk per trade across fifteen simultaneous positions is not 2.5% risk.
+
+The sector cap is the more important of the two. Breakouts cluster: a sector move is the single most common reason a batch of setups all confirm on the same day, so without a cap eight positions can be eight pharma names — one bet at 20% of capital wearing the costume of eight bets at 2.5%. For a breakout strategy that is the most common way a good signal becomes a bad month.
+
+When more candidates confirm than there are slots, **the slots go to the highest-scoring candidates**, with ties broken by symbol for determinism. This is why the pre-close scan collects all confirmations first and opens positions in a second pass — processing in watchlist order would hand the day's capacity to whichever symbol happened to sort first.
+
+Positions already open consume both budgets, so limits hold across days rather than resetting each morning. Pullback entries consume a slot like any other entry. Set either limit to `0` to disable it.
+
+Rejections are logged loudly (`N confirmed breakout(s) not taken — at concentration limits, not for lack of quality`). A setup skipped for capacity is not a setup that failed, and if that list is long and frequent then the limits or the capital are wrong — which is worth seeing rather than inferring from a quiet log.
+
+Sector comes from the universe's industry field via `mood.classify_sector`, the same mapping the scoring uses. A symbol whose industry doesn't map to a canonical sector gets its own single-name bucket rather than being pooled under "unknown" — two unclassifiable names are *unknown*, not known to be alike, and pooling them would make them compete for one sector's slots for no reason.
 
 ### Stop loss
 
@@ -676,6 +931,32 @@ Two targets per trade:
 
 Behavior at target 1: stop moves to entry (breakeven). You can't lose money on the trade anymore. The remaining position runs for target 2.
 
+### Exit fills: gap-through-stop
+
+When the stop is hit, the fill is `min(stop_loss, that day's open)`. If the stock gaps down through the stop overnight, the stop price was never available — the first tradable price is the open, which can be far worse. Assuming a fill at the stop exactly would understate the loss on precisely the trades that hurt most: gap-downs on bad news are the main source of the fat left tail on NSE, so it is where an optimistic assumption does the most damage to the edge estimate.
+
+The same rule applies to the breakeven stop after target 1 — "you can't lose money on the trade anymore" is true intraday, not through a gap.
+
+The target side deliberately has no mirror-image fix: booking the target when the bar opened above it *understates* the gain, which is the conservative direction. `backtest.py::simulate_trade` implements the identical rule, so the two never disagree.
+
+### Transaction costs
+
+Every settled trade — paper and backtest — is netted down by modelled round-trip costs (`breakout/paper/costs.py`, rates in `config.yaml` under `costs:`). NSE equity delivery:
+
+| Charge | Rate | Legs |
+|---|---|---|
+| Brokerage | lower of 0.1% / ₹20 per order | both |
+| STT | 0.1% | both |
+| Exchange transaction | 0.00297% | both |
+| SEBI turnover | 0.0001% | both |
+| Stamp duty | 0.015% | buy only |
+| GST | 18% on brokerage + exchange + SEBI | — |
+| Slippage | 0.05% (not statutory) | both |
+
+All-in this is roughly 0.25–0.35% of round-trip turnover. On the 3–5% moves this strategy targets that is **5–10% of gross P&L**, and it flips marginal trades negative — a +0.1% move does not pay for itself.
+
+`pnl_inr` and `pnl_r` are both **net**; `gross_pnl_inr` and `costs_inr` are stored alongside so the drag is visible rather than silently baked in, and the digest prints gross, net, and costs-as-%-of-gross. Set `costs.enabled: false` to compare against the old gross-only numbers.
+
 ### Time exit
 
 If neither stop nor target hits within `hold_max_days` (default 30 trading days), close at that day's close. The intuition: a breakout that hasn't worked in 6 weeks is probably not going to. Better to free up the capital.
@@ -684,12 +965,18 @@ If neither stop nor target hits within `hold_max_days` (default 30 trading days)
 
 - Entry date, entry price
 - Exit date, exit price
-- PnL in INR, PnL in R-multiples
+- PnL in INR and in R-multiples, both **net of transaction costs**
+- Gross PnL in INR and the costs deducted, so the drag is auditable
 - Days held
-- Max favorable excursion (highest unrealized profit during trade)
-- Max adverse excursion (worst unrealized loss)
+- Max favorable excursion — the highest the position ever traded, in R
+- Max adverse excursion — the lowest it ever traded, in R
 
-The max-favorable / max-adverse fields let you analyze "did I leave money on the table?" — if max favorable was +4R but you exited at +2R, the trade had more in it.
+These two were in the schema and documented here from the start but **were never written** until 2026-09-12. They are the cheapest way to learn whether the stop and target are in the right place, and neither question is answerable from realised P&L alone:
+
+- `max_favorable` 3.5R on a trade that exited at the +2R target → the target is too near, you're leaving money on the table
+- `max_adverse` −0.9R on a trade that went on to win → the stop is barely surviving; a slightly tighter one would have converted winners into losers
+
+Measured in R rather than rupees so trades of different sizes compare directly. Bars are taken strictly *after* the entry day, matching the settle's rule that the entry bar's range mostly printed before the 3 PM fill. Recomputed from cached bars on every settle rather than accumulated, so re-running the job is idempotent.
 
 ---
 
@@ -747,12 +1034,12 @@ All three are invokable as `python -m breakout.jobs.<job_name>`. Designed to be 
 1. Read every paper trade in an OPEN state (`ALERTED`, `ENTERED`, or `TARGET_1_HIT`).
 2. For each, fetch today's settled OHLC.
 3. Walk through the state machine:
-   - `ALERTED` from yesterday → transition to `ENTERED` using today's open (entry price = today's open).
-   - `ALERTED` for > `alert_ttl_days` (default 2) → close as `CANCELED`.
-   - `ENTERED` with today's low ≤ stop → close as `STOPPED_OUT`.
+   - `ENTERED` with today's low ≤ stop → close as `STOPPED_OUT`, filled at `min(stop, today's open)` so a gap through the stop is priced honestly.
    - `ENTERED` with today's high ≥ target_2 → close as `TARGET_HIT`.
    - `ENTERED` with today's high ≥ target_1 (but not target_2) → transition to `TARGET_1_HIT` (partial; stop moves to entry).
    - `ENTERED` with days_held ≥ `hold_max_days` (default 30) → close as `TIME_EXIT` at today's close.
+   - Legacy `ALERTED` rows are skipped with a warning — nothing produces that state any more.
+4. Refresh the derived columns on every open trade: `days_in_trade`, `daily_moves`, and `max_favorable` / `max_adverse`.
 
 **Output:** Log lines showing each transition. Updated `paper_trades` table.
 
@@ -800,8 +1087,55 @@ breakout_level: REAL
 score: REAL  (0-100)
 detected_date: TEXT
 base_height: REAL  (for measured-move target)
+pattern_confidence, rs_percentile, rs_points, tightness, volume_ratio: REAL
+distance_pct, adv_cr, vix: REAL
+stage, sector, sector_trend, market_mood: TEXT
+regime: TEXT              ('risk_on' | 'neutral' | 'risk_off')
+regime_score: INTEGER     (-3..+3 — the sum of the three regime votes)
+breadth_pct: REAL         (% of universe above its own 50DMA)
+nifty_trend: TEXT         ('up' | 'flat' | 'down')
+risk_multiplier: REAL     (applied to risk_per_trade_pct at entry)
+earnings_blackout: BOOL
 notes: TEXT  (compact details: 'adv=12.5cr dist=0.85% touches=4 ...')
 ```
+
+Each feature is a real column, not just folded into `score`. The pre-close scan
+reads them back to recompute the composite with the confirmation day's volume
+(`_rescore`) and to write the `alert_features` row. A score alone cannot be
+decomposed after the fact.
+
+#### `alert_features`
+One row per emitted alert: every signal the scanner saw at the moment it fired.
+```
+trade_id  -> joins paper_trades.id
+symbol, alert_date, alert_type, pattern: TEXT
+score, pattern_confidence: REAL
+rs_percentile, rs_points, tightness: REAL
+volume_ratio: REAL        (confirmation day — the decisive one)
+volume_ratio_morning: REAL
+sector, sector_trend, stage, market_mood: TEXT
+distance_pct: REAL        (morning proximity to the level)
+extension_pct: REAL       (how far above the level we actually paid)
+close_in_range: REAL      (0 = closed at the low, 1 = at the high)
+atr_pct: REAL             (ATR14 as % of entry — volatility, comparable across names)
+adv_cr, vix: REAL
+regime, nifty_trend: TEXT            (the day's market regime — see § 10)
+regime_score, breadth_pct, risk_multiplier: REAL
+earnings_blackout: BOOL
+breakout_level, entry_price, base_height: REAL
+```
+
+**Why this sheet exists.** The composite score weights six signals, but until
+now nothing recorded what those signals *were* when an alert fired — only the
+final number. That made the weights permanently unimprovable: you could cut
+results by score band and pattern, and no further. With this sheet,
+`Store.read_alerts_with_outcomes()` joins each predictor to the realised
+`pnl_r`, and `paper.stats.feature_report` buckets them, so after a few dozen
+settled trades the weights in `scoring.py` can be set from evidence instead of
+priors. Upserts on `trade_id`, so re-running a scan the same day is safe.
+
+`close_in_range` and `atr_pct` are new signals that are **logged but not
+scored** — deliberately. Log first, score once the sample says it matters.
 
 #### `pullback_watchlist`
 Stocks that broke out in the last 10 days and may give a pullback re-entry. Rolling — entries get pruned when older than 10 days.
@@ -823,7 +1157,8 @@ entry_date, entry_price: ...
 stop_loss, target_1, target_2: REAL
 exit_date, exit_price: ...
 shares: INTEGER
-pnl_inr, pnl_r: REAL  (R = R-multiples)
+pnl_inr, pnl_r: REAL  (R = R-multiples; both NET of transaction costs)
+gross_pnl_inr, costs_inr: REAL  (pre-cost P&L and the drag — see § 12)
 days_held: INTEGER
 days_in_trade: TEXT  ("D3" — trading days elapsed since entry; entry day = D0)
 daily_moves: TEXT    ("D1:1.0%,D2:3.7%,D3:-2.3%" — that single day's move)
@@ -1113,7 +1448,11 @@ risk:
   # Mathematical max position size = capital × risk_pct / (entry - stop).
 
   max_concurrent_positions: 8
-  # Not enforced yet; advisory. With 8 positions at 2.5% each, total at-risk = 20%.
+  # Enforced at entry. With 8 positions at 2.5% each, total at-risk = 20%.
+
+  max_positions_per_sector: 3
+  # Open positions allowed to share a sector. Without this, 8 positions can be
+  # one bet — breakouts cluster by sector. 0 disables either limit. See § 12.
 
 scoring_weights:
   # These are not currently read by scoring.py — the weights are hardcoded
@@ -1130,7 +1469,20 @@ thresholds:
   # Alerts emitted only if composite score >= this. Watchlist is 50 (hardcoded).
 
   min_volume_ratio: 1.5
-  # Breakout candle volume / 20-day avg. Below this = no confirmation.
+  # Breakout candle volume / 20-day avg. Below this = no confirmation. Also the
+  # knee of the volume score: this ratio earns half the 15-point weight.
+
+  volume_saturation_ratio: 3.0
+  # Where the volume score reaches full weight. Raise it to demand a bigger
+  # spike for full credit; lower it back toward min_volume_ratio to restore the
+  # old saturate-at-the-gate behaviour (not recommended — see § 11).
+
+  extension_free_pct: 2.0
+  extension_max_pct: 8.0
+  extension_max_penalty: 10.0
+  # Chase penalty. No penalty up to `free`, ramping to `max_penalty` points off
+  # at `max_pct` above the breakout level, capped beyond. Set max_penalty: 0 to
+  # disable while still logging `extension_pct` per alert.
 
   min_market_cap_cr: 500
   # Quality floor. INR crores.
@@ -1185,14 +1537,55 @@ paper_trading:
   hold_max_days: 30
   # Time-exit threshold. Trades held this long without resolution close at close.
 
-  alert_ttl_days: 2
-  # ALERTED -> CANCELED if no confirmation within this many days.
+  # `alert_ttl_days` was removed on 2026-09-12. It governed ALERTED -> CANCELED
+  # under the old next-day-open entry model; trades now open as ENTERED at the
+  # 3 PM confirmation, so there is no waiting period for it to expire. A
+  # leftover key in your config.yaml is ignored with a warning, not a crash.
 
   atr_stop_multiplier: 1.5
   # stop = breakout_level - (multiplier × ATR(14)).
 
   target_1_r_multiple: 2.0
   # target_1 = entry + (multiple × (entry - stop)).
+
+regime:
+  enabled: true
+  # Scale position size by market regime (§ 10). false keeps measuring and
+  # logging the regime but pins the multiplier at 1.0.
+
+  nifty_symbol: "^NSEI"
+  nifty_sma: 200
+  nifty_slope_lookback: 20
+  # The index-trend vote: close vs a rising/falling 200DMA.
+
+  breadth_sma: 50
+  breadth_up_pct: 60    # >= this % of the universe above its 50DMA is a +1 vote
+  breadth_down_pct: 40  # <= this % is a -1 vote
+
+  risk_off_multiplier: 0.5   # regime score <= -2
+  severe_multiplier: 0.25    # regime score == -3 (all three votes negative)
+  # Priors, not findings. `regime` / `regime_score` / `breadth_pct` are logged
+  # per alert so these can be re-set from realised outcomes.
+
+costs:
+  enabled: true
+  # Net round-trip transaction costs off every settled trade (paper and
+  # backtest). Set false to see the old gross-only numbers. See § 12.
+
+  brokerage_pct: 0.1
+  brokerage_max_inr: 20
+  # Broker-specific: Angel One charges the lower of the two per executed order.
+
+  stt_pct: 0.1              # both legs
+  exchange_txn_pct: 0.00297 # NSE
+  sebi_turnover_pct: 0.0001
+  stamp_duty_pct: 0.015     # buy leg only
+  gst_pct: 18               # on brokerage + exchange + SEBI
+  # Statutory; change only if the SEBI/NSE schedule changes.
+
+  slippage_pct: 0.05
+  # Not statutory — a haircut on the idealised fill, per leg. Raise it if the
+  # names you trade are thin.
 
 paths:
   data_cache: "data_cache"   # Excel workbook + cached OHLCV

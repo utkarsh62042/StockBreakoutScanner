@@ -8,11 +8,16 @@ import pandas as pd
 import pytest
 
 from breakout.backtest import backtest_symbol, run_backtest, simulate_trade
+from breakout.config import CostsConfig
 from breakout.paper.tracker import TradeState
 
+# Costs off: these tests pin the exit *mechanics*, so the R-multiples stay
+# round numbers. The cost model itself is covered in test_costs.py.
 CFG = SimpleNamespace(
     paper_trading=SimpleNamespace(atr_stop_multiplier=1.5, target_1_r_multiple=2.0, hold_max_days=6),
-    risk=SimpleNamespace(capital=200000.0, risk_per_trade_pct=2.5),
+    risk=SimpleNamespace(capital=200000.0, risk_per_trade_pct=2.5,
+                         max_concurrent_positions=8),
+    costs=CostsConfig(enabled=False),
 )
 
 

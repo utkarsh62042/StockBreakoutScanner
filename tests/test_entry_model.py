@@ -14,11 +14,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from breakout.config import CostsConfig
 from breakout.paper.tracker import (
     TradeState,
     compute_stop,
     compute_targets,
     insert_alert,
+    max_position_value,
     position_size,
     settle_one_trade,
 )
@@ -30,7 +32,11 @@ CFG = SimpleNamespace(
         hold_max_days=10,
         alert_ttl_days=2,
     ),
-    risk=SimpleNamespace(capital=200000.0, risk_per_trade_pct=2.0),
+    risk=SimpleNamespace(capital=200000.0, risk_per_trade_pct=2.0,
+                         max_concurrent_positions=8),
+    # Costs off here so the entry-model arithmetic stays exact; the cost model
+    # has its own tests in test_costs.py.
+    costs=CostsConfig(enabled=False),
 )
 
 LEVEL = 210.0
@@ -111,8 +117,20 @@ def test_position_size_shrinks_as_the_entry_extends_past_the_level() -> None:
     extended = _insert(entry_price=PRECLOSE)
     assert extended["shares"] < at_level["shares"]
     assert extended["shares"] == position_size(
-        CFG.risk.capital, CFG.risk.risk_per_trade_pct, PRECLOSE, STOP
+        CFG.risk.capital, CFG.risk.risk_per_trade_pct, PRECLOSE, STOP,
+        max_value=max_position_value(
+            CFG.risk.capital, CFG.risk.max_concurrent_positions
+        ),
     )
+
+
+def test_a_position_never_exceeds_its_share_of_capital() -> None:
+    """Risk-based sizing alone has no idea what a position *costs*. Before the
+    cap, this ₹220 entry with a ₹16 stop bought 250 shares — ₹55,000, 27% of a
+    ₹2,00,000 account, on a strategy meant to hold eight at once."""
+    row = _insert()
+    cap = max_position_value(CFG.risk.capital, CFG.risk.max_concurrent_positions)
+    assert row["shares"] * row["entry_price"] <= cap + row["entry_price"]
 
 
 def test_row_matches_the_standalone_helpers() -> None:

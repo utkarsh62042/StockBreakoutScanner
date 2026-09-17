@@ -53,9 +53,31 @@ _SCHEMAS: dict[str, list[str]] = {
         "symbol", "company_name", "sector", "industry", "market_cap_cr",
         "last_updated",
     ],
+    # The morning scan's feature values are carried as real columns, not packed
+    # into `notes`: the pre-close scan reads them back to build the alert and
+    # the `alert_features` row, and a string would have to be re-parsed.
     "setup_watchlist": [
         "symbol", "pattern", "breakout_level", "score", "detected_date",
-        "base_height", "notes",
+        "base_height", "pattern_confidence", "stage", "rs_percentile",
+        "rs_points", "tightness", "volume_ratio", "sector", "sector_trend",
+        "distance_pct", "adv_cr", "earnings_blackout", "vix", "market_mood",
+        "regime", "regime_score", "breadth_pct", "nifty_trend",
+        "risk_multiplier", "notes",
+    ],
+    # One row per emitted alert, holding every signal the scanner saw at the
+    # moment it fired. `trade_id` joins to `paper_trades`, so outcome-vs-feature
+    # questions ("does tightness predict anything?", "is the 60-70 band worth
+    # alerting?") become a join instead of a guess. Nothing here is scored yet —
+    # the point is to accumulate the evidence needed to re-weight `scoring.py`
+    # from results rather than from priors.
+    "alert_features": [
+        "trade_id", "symbol", "alert_date", "alert_type", "pattern", "score",
+        "pattern_confidence", "stage", "rs_percentile", "rs_points",
+        "tightness", "volume_ratio", "volume_ratio_morning", "sector",
+        "sector_trend", "distance_pct", "extension_pct", "close_in_range",
+        "atr_pct", "adv_cr", "earnings_blackout", "vix", "market_mood",
+        "regime", "regime_score", "breadth_pct", "nifty_trend",
+        "risk_multiplier", "breakout_level", "entry_price", "base_height",
     ],
     "pullback_watchlist": [
         "symbol", "breakout_date", "breakout_level", "original_score", "notes",
@@ -64,6 +86,7 @@ _SCHEMAS: dict[str, list[str]] = {
         "id", "symbol", "pattern", "alert_date", "alert_type", "score",
         "state", "entry_date", "entry_price", "stop_loss", "target_1",
         "target_2", "exit_date", "exit_price", "shares", "pnl_inr", "pnl_r",
+        "gross_pnl_inr", "costs_inr",
         "days_held", "days_in_trade", "daily_moves", "max_favorable",
         "max_adverse", "notes",
     ],
@@ -76,6 +99,12 @@ _SCHEMAS: dict[str, list[str]] = {
     ],
 }
 
+# Paper-trade states whose price levels are still live and so must follow a
+# feed re-adjustment (see `Store._rebase_open_trades`). Mirrors
+# `breakout.paper.tracker.OPEN_STATES`, duplicated to keep the data layer from
+# importing the paper layer; `tests/test_price_adjustment.py` asserts they match.
+_OPEN_TRADE_STATES = ("ALERTED", "ENTERED", "TARGET_1_HIT")
+
 # Columns holding ISO date/timestamp strings. On load we coerce these back to
 # plain strings so downstream `pd.to_datetime(...)` / date math is stable even
 # if Excel typed a cell as a datetime.
@@ -86,7 +115,7 @@ _DATE_COLS = {
 
 # Integer-valued columns — coerced to int (not float) in returned records so
 # ids and counts read cleanly.
-_INT_COLS = {"id", "shares", "days_held", "alerts_generated", "volume"}
+_INT_COLS = {"id", "trade_id", "shares", "days_held", "alerts_generated", "volume"}
 
 # Transient-lock retry policy. This project's data_cache lives under a OneDrive
 # folder, and OneDrive (or Excel, if the user has the workbook open) can hold a
@@ -258,13 +287,46 @@ class Store:
             )
         incoming = pd.DataFrame(rows, columns=_SCHEMAS["prices"])
         existing = self._sheets["prices"]
-        # Drop any existing (symbol, date) rows the incoming batch replaces.
         if not existing.empty:
+            existing, factor = _rebase_on_readjustment(symbol, existing, incoming)
+            if factor is not None:
+                # Keeps the store's invariant: every price this symbol is
+                # measured against — cached bars and the levels on its open
+                # trades — sits on one adjustment basis.
+                self._rebase_open_trades(symbol, factor)
+            # Drop any existing (symbol, date) rows the incoming batch replaces.
             dup_dates = set(incoming["date"])
             mask = (existing["symbol"] == symbol) & (existing["date"].isin(dup_dates))
             existing = existing[~mask]
         self._sheets["prices"] = pd.concat([existing, incoming], ignore_index=True)
         return len(rows)
+
+    def _rebase_open_trades(self, symbol: str, price_factor: float) -> None:
+        """Scale the price levels on `symbol`'s open paper trades by `price_factor`.
+
+        Without this, a split is catastrophic for the audit log: the cached bars
+        halve while `stop_loss` stays on the old basis, so the next settle reads
+        every open position as stopped out at a ~-50% loss and the paper record
+        — the whole point of the exercise — is destroyed.
+
+        Share count moves inversely (a 1:2 split halves the price and doubles
+        the holding), which leaves rupee risk and therefore `pnl_inr` unchanged.
+        """
+        df = self._sheets["paper_trades"]
+        if df.empty:
+            return
+        mask = (df["symbol"] == symbol) & df["state"].isin(_OPEN_TRADE_STATES)
+        if not mask.any():
+            return
+        for col in ("entry_price", "stop_loss", "target_1", "target_2"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+            df.loc[mask, col] = df.loc[mask, col] * price_factor
+        df["shares"] = pd.to_numeric(df["shares"], errors="coerce")
+        df.loc[mask, "shares"] = (df.loc[mask, "shares"] / price_factor).round()
+        logger.info(
+            f"{symbol}: re-based {int(mask.sum())} open paper trade(s) by "
+            f"x{price_factor:.6f}"
+        )
 
     def read_prices(self, symbol: str, lookback_days: int | None = None) -> pd.DataFrame:
         """Return a symbol's price history as a DataFrame indexed by date.
@@ -288,6 +350,20 @@ class Store:
         for c in ("open", "high", "low", "close", "volume"):
             sub[c] = pd.to_numeric(sub[c], errors="coerce")
         return sub
+
+    def delete_prices(self, symbol: str | None = None) -> int:
+        """Drop cached bars for `symbol`, or for every symbol when None.
+
+        Used to force a clean refetch when the cache can't be repaired in place
+        — see `scripts/refetch_prices.py`.
+        """
+        df = self._sheets["prices"]
+        if df.empty:
+            return 0
+        drop = df["symbol"].notna() if symbol is None else (df["symbol"] == symbol)
+        removed = int(drop.sum())
+        self._sheets["prices"] = df[~drop].reset_index(drop=True)
+        return removed
 
     def latest_price_date(self, symbol: str) -> date | None:
         df = self._sheets["prices"]
@@ -330,22 +406,19 @@ class Store:
     # ── Watchlists ───────────────────────────────────────────────────────
 
     def replace_setup_watchlist(self, rows: list[dict]) -> None:
-        """Atomically replace the setup watchlist with today's findings."""
-        records = [
-            {
-                "symbol": r["symbol"],
-                "pattern": r.get("pattern"),
-                "breakout_level": r.get("breakout_level"),
-                "score": r.get("score"),
-                "detected_date": r.get("detected_date") or date.today().isoformat(),
-                "base_height": r.get("base_height"),
-                "notes": r.get("notes"),
-            }
-            for r in rows
-        ]
-        self._sheets["setup_watchlist"] = pd.DataFrame(
-            records, columns=_SCHEMAS["setup_watchlist"]
-        )
+        """Atomically replace the setup watchlist with today's findings.
+
+        Unknown keys are dropped and absent ones default to None, so the caller
+        can hand over whatever features it computed without tracking the schema.
+        """
+        cols = _SCHEMAS["setup_watchlist"]
+        records = []
+        for r in rows:
+            rec = {c: r.get(c) for c in cols}
+            rec["symbol"] = r["symbol"]
+            rec["detected_date"] = r.get("detected_date") or date.today().isoformat()
+            records.append(rec)
+        self._sheets["setup_watchlist"] = pd.DataFrame(records, columns=cols)
 
     def read_setup_watchlist(self) -> list[dict]:
         df = self._sheets["setup_watchlist"]
@@ -420,14 +493,55 @@ class Store:
         mask = df["id"] == trade_id
         for k, v in fields.items():
             if k in df.columns:
-                # `.loc` with a scalar assigns to every matched row.
-                df.loc[mask, k] = v
+                _assign(df, mask, k, v)
 
     def read_paper_trades_by_state(self, *states: str) -> list[dict]:
         df = self._sheets["paper_trades"]
         if states:
             df = df[df["state"].isin(states)]
         return _records(df)
+
+    # ── Alert features ───────────────────────────────────────────────────
+
+    def insert_alert_features(self, row: dict) -> None:
+        """Record the signal snapshot behind one alert.
+
+        Upserts on `trade_id` so re-running the pre-close scan on the same day
+        doesn't duplicate a row.
+        """
+        cols = _SCHEMAS["alert_features"]
+        record = {c: row.get(c) for c in cols}
+        df = self._sheets["alert_features"]
+        if not df.empty and record.get("trade_id") is not None:
+            keep = pd.to_numeric(df["trade_id"], errors="coerce") != record["trade_id"]
+            df = df[keep]
+        self._sheets["alert_features"] = pd.concat(
+            [df, pd.DataFrame([record], columns=cols)], ignore_index=True
+        )
+
+    def read_alert_features(self) -> list[dict]:
+        return _records(self._sheets["alert_features"])
+
+    def read_alerts_with_outcomes(self) -> list[dict]:
+        """Feature rows joined to their trade's outcome.
+
+        The analysis view: every predictor the scanner saw, next to what
+        actually happened. Trades that haven't settled yet carry `pnl_r=None`
+        and are filtered out by the reporting layer.
+        """
+        features = self._sheets["alert_features"]
+        if features.empty:
+            return []
+        trades = self._sheets["paper_trades"]
+        outcome_cols = ["id", "state", "pnl_r", "pnl_inr", "days_held", "exit_date"]
+        if trades.empty:
+            return _records(features)
+        right = trades[[c for c in outcome_cols if c in trades.columns]].copy()
+        right["id"] = pd.to_numeric(right["id"], errors="coerce")
+        left = features.copy()
+        left["trade_id"] = pd.to_numeric(left["trade_id"], errors="coerce")
+        merged = left.merge(right, how="left", left_on="trade_id", right_on="id")
+        return _records(merged.drop(columns=["id"]))
 
     # ── Failed breakouts ─────────────────────────────────────────────────
 
@@ -479,10 +593,10 @@ class Store:
     ) -> None:
         df = self._sheets["run_log"]
         mask = df["id"] == run_id
-        df.loc[mask, "finished_at"] = datetime.now().isoformat(timespec="seconds")
-        df.loc[mask, "status"] = status
-        df.loc[mask, "alerts_generated"] = alerts_generated
-        df.loc[mask, "error_message"] = error_message
+        _assign(df, mask, "finished_at", datetime.now().isoformat(timespec="seconds"))
+        _assign(df, mask, "status", status)
+        _assign(df, mask, "alerts_generated", alerts_generated)
+        _assign(df, mask, "error_message", error_message)
 
     # ── Internals ─────────────────────────────────────────────────────────
 
@@ -491,6 +605,106 @@ class Store:
         if df.empty or df["id"].dropna().empty:
             return 1
         return int(pd.to_numeric(df["id"], errors="coerce").max()) + 1
+
+
+# ── Adjustment re-basing ─────────────────────────────────────────────────
+# A split, bonus or dividend makes the feed back-adjust a symbol's *whole*
+# history. Replacing only the dates in the incoming batch would then leave the
+# cache straddling two price bases, with an artificial cliff where they meet —
+# exactly the corruption adjusted bars are meant to avoid.
+#
+# The factor is measured rather than assumed: compare incoming bars against
+# cached bars on the same dates and take the median ratio. That needs no
+# knowledge of *which* action occurred, handles splits and dividends alike, and
+# is idempotent (once re-based the ratio is 1, so nothing happens again).
+# Prices and volume get their own factor because a split moves both (inversely)
+# while a dividend adjustment moves only prices.
+
+#: Overlapping bars required before a ratio is trusted — one shared date could
+#: be a one-off feed correction rather than a re-adjustment.
+_REBASE_MIN_OVERLAP = 3
+#: Ratios within this of 1.0 are float noise or a rounding change, not an
+#: adjustment. 0.5% is below the smallest meaningful Indian dividend yield.
+_REBASE_TOLERANCE = 0.005
+#: A ratio outside this range is implausible as a corporate action (a 1:20
+#: split is 0.05) and more likely a bad feed response — ignore it rather than
+#: destroy the cache.
+_REBASE_MIN_FACTOR = 0.01
+_REBASE_MAX_FACTOR = 100.0
+
+
+def _median_ratio(new: pd.Series, old: pd.Series) -> float | None:
+    """Median of `new / old` over pairs where both are positive numbers.
+
+    The median (not the mean) so a single bad bar in the overlap can't move it.
+    """
+    n = pd.to_numeric(new, errors="coerce")
+    o = pd.to_numeric(old, errors="coerce")
+    ok = n.notna() & o.notna() & (n > 0) & (o > 0)
+    if not ok.any():
+        return None
+    ratio = float((n[ok] / o[ok]).median())
+    if not (_REBASE_MIN_FACTOR <= ratio <= _REBASE_MAX_FACTOR):
+        return None
+    return ratio
+
+
+def _rebase_on_readjustment(
+    symbol: str, existing: pd.DataFrame, incoming: pd.DataFrame
+) -> tuple[pd.DataFrame, float | None]:
+    """Put `symbol`'s cached bars on the same adjustment basis as `incoming`.
+
+    Returns `(existing, price_factor)` with this symbol's OHLC (and volume, when
+    it moved too) scaled by the observed factor, or `(existing, None)` when the
+    feed has not re-adjusted.
+    """
+    mask = existing["symbol"] == symbol
+    if not mask.any():
+        return existing, None
+    overlap = existing.loc[mask, ["date", "close", "volume"]].merge(
+        incoming[["date", "close", "volume"]], on="date", suffixes=("_old", "_new")
+    )
+    if len(overlap) < _REBASE_MIN_OVERLAP:
+        return existing, None
+
+    price_factor = _median_ratio(overlap["close_new"], overlap["close_old"])
+    if price_factor is None or abs(price_factor - 1.0) <= _REBASE_TOLERANCE:
+        return existing, None
+
+    logger.info(
+        f"{symbol}: feed re-adjusted (x{price_factor:.6f} on {len(overlap)} "
+        f"overlapping bars) — re-basing {int(mask.sum())} cached bars"
+    )
+    for col in ("open", "high", "low", "close"):
+        existing[col] = pd.to_numeric(existing[col], errors="coerce")
+        existing.loc[mask, col] = existing.loc[mask, col] * price_factor
+
+    # Volume only moves on a share-count change (split/bonus), so it carries its
+    # own factor — scaling it by the price factor would corrupt volume_ratio_20
+    # on every dividend.
+    volume_factor = _median_ratio(overlap["volume_new"], overlap["volume_old"])
+    if volume_factor is not None and abs(volume_factor - 1.0) > _REBASE_TOLERANCE:
+        existing["volume"] = pd.to_numeric(existing["volume"], errors="coerce")
+        existing.loc[mask, "volume"] = (
+            existing.loc[mask, "volume"] * volume_factor
+        ).round()
+    return existing, price_factor
+
+
+def _assign(df: pd.DataFrame, mask, column: str, value: Any) -> None:
+    """Set `column` to `value` on the masked rows, in place.
+
+    A text column that is still entirely blank in the workbook reads back as
+    all-NaN float64, and pandas >=2.1 refuses to store a string in it
+    (`TypeError: Invalid value 'D0' for dtype 'float64'`). Widen the column to
+    `object` first when the value can't live in the current dtype.
+    """
+    col = df[column]
+    if value is not None and not pd.api.types.is_object_dtype(col):
+        if not pd.api.types.is_number(value) and not isinstance(value, bool):
+            df[column] = col.astype(object)
+    # `.loc` with a scalar assigns to every matched row.
+    df.loc[mask, column] = value
 
 
 def _records(df: pd.DataFrame) -> list[dict]:

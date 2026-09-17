@@ -9,6 +9,7 @@ risk:
   capital: 500000
   risk_per_trade_pct: 1.0
   max_concurrent_positions: 8
+  max_positions_per_sector: 3
 
 scoring_weights:
   pattern_quality: 35
@@ -21,6 +22,10 @@ scoring_weights:
 thresholds:
   min_score_to_alert: 60
   min_volume_ratio: 1.5
+  volume_saturation_ratio: 3.0
+  extension_free_pct: 2.0
+  extension_max_pct: 8.0
+  extension_max_penalty: 10.0
   min_market_cap_cr: 500
   min_adv_cr: 5
   min_listing_days: 365
@@ -50,9 +55,34 @@ output:
 paper_trading:
   enabled: true
   hold_max_days: 30
-  alert_ttl_days: 2
   atr_stop_multiplier: 1.5
   target_1_r_multiple: 2.0
+
+# Market-regime gate: scales position size by NIFTY trend + market breadth +
+# India VIX. Never raises size above baseline. See GUIDE § 10.
+regime:
+  enabled: true
+  nifty_symbol: "^NSEI"
+  nifty_sma: 200
+  nifty_slope_lookback: 20
+  breadth_sma: 50
+  breadth_up_pct: 60
+  breadth_down_pct: 40
+  risk_off_multiplier: 0.5
+  severe_multiplier: 0.25
+
+# Round-trip transaction costs, netted off every settled trade. Rates are % of
+# one leg's turnover; NSE equity delivery. Set enabled: false to see gross P&L.
+costs:
+  enabled: true
+  brokerage_pct: 0.1
+  brokerage_max_inr: 20
+  stt_pct: 0.1
+  exchange_txn_pct: 0.00297
+  sebi_turnover_pct: 0.0001
+  stamp_duty_pct: 0.015
+  gst_pct: 18
+  slippage_pct: 0.05
 
 paths:
   data_cache: "data_cache"

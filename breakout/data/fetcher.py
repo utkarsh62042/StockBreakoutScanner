@@ -251,6 +251,23 @@ class YFinanceFetcher(DataFetcher):
     yfinance accepts a `period` argument like '1y', '2y', '5y'. We choose
     the smallest period that covers the requested number of trading days
     plus a small buffer for holidays.
+
+    Bars are fully adjusted (`auto_adjust=True`), which matters less than it
+    looks: yfinance back-adjusts **splits and bonuses regardless of the flag**
+    (verified — HEG's 5:1 split of 2024-10-18 shows no cliff with
+    `auto_adjust=False`). The flag only adds **dividend** back-adjustment, worth
+    ~1-2% on older bars. We take it because it puts the whole series on one
+    basis, which is what the 63-day relative-strength return and the long
+    52-week / 30-week windows are implicitly assuming.
+
+    What neither setting fixes is a **demerger or capital reduction** — Yahoo
+    does not model these as splits, so the price drop stays in the series as if
+    it were real trading. On NSE that is the common case, not an edge case
+    (VEDL, ABFRL, TMPV, TRENT all demerged within the cached window), and a
+    -65% phantom bar wrecks the 52-week high, every base detector, ATR and so
+    the stop, the SMA slope and so the stage. There is no feed-level remedy;
+    `data.validate` is the defence, and it is load-bearing rather than a
+    backstop.
     """
 
     min_request_interval = 0.5   # yfinance: ~2 req/s is polite
@@ -280,7 +297,7 @@ class YFinanceFetcher(DataFetcher):
         ticker = self._ticker(symbol)
         try:
             t = yf.Ticker(ticker)
-            df = t.history(period=self._period_for(days), interval="1d", auto_adjust=False)
+            df = t.history(period=self._period_for(days), interval="1d", auto_adjust=True)
         except Exception as e:
             raise FetchError(f"yfinance error for {symbol}: {e}") from e
         if df is None or df.empty:
@@ -297,7 +314,7 @@ class YFinanceFetcher(DataFetcher):
             tickers,
             period=self._period_for(days),
             interval="1d",
-            auto_adjust=False,
+            auto_adjust=True,
             group_by="ticker",
             threads=True,
             progress=False,
@@ -388,6 +405,14 @@ class AngelOneFetcher(DataFetcher):
     Authenticates once on first request (login + TOTP), then caches the
     SmartConnect handle for the lifetime of the fetcher. The instrument
     master JSON (Symbol -> Token mapping) is also cached on first use.
+
+    CAUTION: `getCandleData` returns **unadjusted** candles — Angel One does
+    not back-adjust for splits or bonuses. Unlike the yfinance backend (see
+    `YFinanceFetcher`), re-enabling this one reintroduces split cliffs into the
+    history. `Store.upsert_prices` re-bases cached bars when a feed's
+    adjustment changes, but it cannot invent an adjustment the feed never
+    applied; `data.validate.find_price_discontinuity` is the backstop that
+    keeps a corrupted series from producing signals.
     """
 
     # Angel One's published limit for getCandleData is 3 req/s, but in practice

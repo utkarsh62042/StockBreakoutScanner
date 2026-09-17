@@ -26,6 +26,7 @@ from breakout.paper.tracker import (
     OPEN_STATES,
     apply_outcome,
     compute_daily_progress,
+    compute_excursions,
     settle_one_trade,
 )
 from breakout.trading_calendar import require_trading_day
@@ -130,17 +131,32 @@ def _run(store: Store, cfg: Config) -> int:
 
 
 def _update_daily_progress(store, trade: dict, prices, today: date) -> None:
-    """Refresh the `days_in_trade` / `daily_moves` columns for one trade.
+    """Refresh the derived per-day columns for one trade.
+
+    `days_in_trade` / `daily_moves` show how the position has behaved;
+    `max_favorable` / `max_adverse` record the best and worst it ever got to in
+    R, which is what says whether the target is too near or the stop too tight.
+    All are recomputed from cached bars, so a re-run is idempotent.
 
     A trade is ENTERED from the moment it is created, so entry_date and
     entry_price are always already on the row.
     """
+    fields: dict = {}
     label, moves = compute_daily_progress(
         trade.get("entry_date"), trade.get("entry_price"), prices, today
     )
-    if label is None:
-        return
-    store.update_paper_trade(trade["id"], days_in_trade=label, daily_moves=moves)
+    if label is not None:
+        fields.update(days_in_trade=label, daily_moves=moves)
+
+    favorable, adverse = compute_excursions(
+        trade.get("entry_price"), trade.get("stop_loss"),
+        prices, trade.get("entry_date"), today,
+    )
+    if favorable is not None:
+        fields.update(max_favorable=favorable, max_adverse=adverse)
+
+    if fields:
+        store.update_paper_trade(trade["id"], **fields)
 
 
 # A breakout that closes back below its level within this many days is "failed"

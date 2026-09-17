@@ -24,6 +24,7 @@ from datetime import date
 from breakout.analysis.indicators import add_standard_indicators
 from breakout.analysis.patterns import detect_all
 from breakout.analysis.rs import period_return, rs_percentile_ranks, rs_points
+from breakout.analysis.session import drop_partial_bar
 from breakout.analysis.stage import Stage, classify_stage
 from breakout.analysis.tightness import tightness_score
 from breakout.config import Config, ensure_runtime_dirs, load_config
@@ -35,12 +36,15 @@ from breakout.data.fetcher import (
 )
 from breakout.data.store import Store
 from breakout.data.universe import refresh_universe_if_stale
+from breakout.data.validate import is_continuous
 from breakout.filters.earnings import in_earnings_blackout
+from breakout.filters.gate_audit import audit_gates, render_audit
 from breakout.filters.mood import assess_market, classify_sector, fetch_sector_trends
 from breakout.filters.quality import check_quality
+from breakout.filters.regime import assess_regime, market_breadth, pct_above_sma
 from breakout.logging_setup import setup_logging
-from breakout.scoring import ScoringFeatures, composite_score
-from breakout.trading_calendar import require_trading_day
+from breakout.scoring import ScoringFeatures, composite_score, scoring_params
+from breakout.trading_calendar import last_completed_session, require_trading_day
 
 
 logger = logging.getLogger(__name__)
@@ -79,15 +83,22 @@ def _sector_trends(universe: list[dict], returns: dict[str, float]) -> dict[str,
     return trends
 
 
-def _earnings_dates(symbol: str) -> list:
+def _earnings_dates(symbol: str, seen: dict | None = None) -> list:
     """Per-symbol earnings calendar (best-effort via yfinance). Returns [] when
     the source has no data, which the blackout gate treats as 'not in blackout'.
 
     NOTE: yfinance has ~no earnings coverage for NSE names (verified live —
     returns [] for RELIANCE/TCS/INFY), so the blackout gate is effectively
     inactive today. Swap in an Indian source (NSE announcements / Screener) to
-    actually enable it."""
-    return fetch_earnings_dates(symbol)
+    actually enable it.
+
+    `seen` accumulates {checked, with_dates} so the gate audit can report that
+    inertness from observation rather than from this comment."""
+    dates = fetch_earnings_dates(symbol)
+    if seen is not None:
+        seen["checked"] += 1
+        seen["with_dates"] += 1 if dates else 0
+    return dates
 
 
 def main() -> int:
@@ -154,16 +165,85 @@ def _run(store: Store, cfg: Config) -> int:
     failed = len(stale) - fetched
     logger.info(f"prices: fetched={fetched}, failed={failed}, already-current={current}")
 
+    # Staleness was decided *before* the fetch, so a symbol whose fetch then
+    # failed still sits in the cache carrying old bars — and would be scanned
+    # against them, producing a breakout signal from prices that are days old.
+    # Re-check after the fetch, against the last session that actually closed
+    # (not "today": at 9:30 today's bar is still being written and is
+    # deliberately excluded — see analysis/session.py).
+    required_bar = last_completed_session()
+    fresh: set[str] = set()
+    stale_symbols: list[str] = []
+    for sym in symbols:
+        latest = store.latest_price_date(sym)
+        if latest is not None and latest >= required_bar:
+            fresh.add(sym)
+        else:
+            stale_symbols.append(sym)
+    if stale_symbols:
+        logger.warning(
+            f"{len(stale_symbols)} symbol(s) excluded — no bar for "
+            f"{required_bar}, so any signal would come from old prices: "
+            f"{', '.join(sorted(stale_symbols)[:10])}"
+            f"{' ...' if len(stale_symbols) > 10 else ''}"
+        )
+
     # 2b. Cross-sectional pre-pass: 63-day returns → relative-strength ranks,
     #     and a sector-trend proxy from those returns.
+    # A series with an unadjusted split is excluded here, not just later: its
+    # 63-day return would read as ~-50%, which drags the percentile of every
+    # *other* symbol in the cross-section. One bad series would mis-score the
+    # whole universe.
+    # The same pass also counts market breadth (% of the universe above its own
+    # 50DMA) — the regime gate's participation vote. It is free here: every
+    # symbol's history is already in hand.
     returns: dict[str, float] = {}
+    discontinuous: set[str] = set()
+    breadth_above = breadth_total = 0
     for meta in universe:
-        dfx = store.read_prices(meta["symbol"], lookback_days=_PRICE_HISTORY_DAYS)
+        # Stale symbols are excluded from the cross-section too, not just from
+        # the scan: a symbol frozen at last week's price would show a stale
+        # 63-day return and distort every *other* symbol's RS percentile.
+        if meta["symbol"] not in fresh:
+            continue
+        dfx = drop_partial_bar(
+            store.read_prices(meta["symbol"], lookback_days=_PRICE_HISTORY_DAYS)
+        )
+        if len(dfx) and not is_continuous(dfx, meta["symbol"]):
+            discontinuous.add(meta["symbol"])
+            continue
+        if len(dfx):
+            above = pct_above_sma(dfx["close"], cfg.regime.breadth_sma)
+            if above is not None:
+                breadth_total += 1
+                breadth_above += int(above)
         r = period_return(dfx, _RS_LOOKBACK) if len(dfx) else float("nan")
         if r == r:  # not NaN
             returns[meta["symbol"]] = r
     rs_ranks = rs_percentile_ranks(returns)
     logger.info(f"relative strength: ranked {len(rs_ranks)} symbols")
+
+    # Regime: NIFTY trend + breadth + VIX → a multiplier on risk per trade.
+    # Assessed here (not at pre-close) because breadth needs the whole universe;
+    # it rides on the watchlist row so the 3 PM scan can size with it.
+    breadth_pct = market_breadth(breadth_above, breadth_total)
+    regime = assess_regime(
+        fetch_yf_index(cfg.regime.nifty_symbol, days=_PRICE_HISTORY_DAYS),
+        breadth_pct,
+        mood["mood"],
+        cfg.regime,
+    )
+    logger.info(f"regime: {regime.summary()} [{', '.join(regime.reasons)}]")
+    if regime.risk_multiplier < 1.0:
+        logger.warning(
+            f"risk-off regime — position sizes scaled to "
+            f"{regime.risk_multiplier:.0%} of normal today"
+        )
+    if discontinuous:
+        logger.warning(
+            f"{len(discontinuous)} symbol(s) excluded for price discontinuity: "
+            f"{', '.join(sorted(discontinuous)[:10])}"
+        )
 
     # Sector trend: prefer the live NIFTY sector indices; fall back to the
     # member-return proxy for any index that didn't fetch.
@@ -175,11 +255,31 @@ def _run(store: Store, cfg: Config) -> int:
 
     # 3. Run analysis per symbol
     setup_rows: list[dict] = []
-    skipped: dict[str, int] = {"insufficient_data": 0, "quality": 0, "stage": 0,
+    skipped: dict[str, int] = {"stale": 0, "insufficient_data": 0,
+                                "discontinuous": 0, "quality": 0, "stage": 0,
                                 "no_pattern": 0, "far_from_breakout": 0, "low_score": 0}
+    # Observations that feed the gate audit at the end of the run — which of
+    # the quality gates actually rejected anything today.
+    earnings_seen = {"checked": 0, "with_dates": 0}
+    quality_checked = 0
+    adv_rejected = 0
     for meta in universe:
         symbol = meta["symbol"]
-        df = store.read_prices(symbol, lookback_days=_PRICE_HISTORY_DAYS)
+        if symbol not in fresh:
+            skipped["stale"] += 1
+            continue
+        if symbol in discontinuous:
+            skipped["discontinuous"] += 1
+            continue
+        # Today's bar is ~15 minutes old at 9:30 and holds ~4% of the session's
+        # volume. Left in, every candidate's volume ratio reads as ~0.04x and
+        # drags its score down for no reason but the clock; projecting from 4%
+        # would multiply the opening fifteen minutes by ~26. The morning scan
+        # judges setups on completed history — the pre-close scan does the real
+        # volume check on a bar that is nearly whole.
+        df = drop_partial_bar(
+            store.read_prices(symbol, lookback_days=_PRICE_HISTORY_DAYS)
+        )
         if len(df) < 200:
             skipped["insufficient_data"] += 1
             continue
@@ -188,6 +288,9 @@ def _run(store: Store, cfg: Config) -> int:
 
         # Quality floor
         qual = check_quality(df, meta, cfg.thresholds)
+        quality_checked += 1
+        if any(r.startswith("adv_below_floor") for r in qual.reasons_failed):
+            adv_rejected += 1
         if not qual.passed:
             skipped["quality"] += 1
             continue
@@ -223,21 +326,33 @@ def _run(store: Store, cfg: Config) -> int:
         # Composite score — now with the full Phase 2 signal set.
         vol_ratio = df["volume_ratio_20"].iloc[-1]
         sector = classify_sector(meta.get("industry"))
+        rs_percentile = rs_ranks.get(symbol, 0.0)
+        tightness = tightness_score(df)
+        sector_trend = sector_trend_map.get(sector, "flat")
+        blackout = in_earnings_blackout(
+            date.today(), _earnings_dates(symbol, earnings_seen)
+        )
         features = ScoringFeatures(
             quality_pass=True,
             stage=Stage.STAGE_2,
-            earnings_blackout=in_earnings_blackout(date.today(), _earnings_dates(symbol)),
+            earnings_blackout=blackout,
             pattern_match=top,
             volume_ratio=float(vol_ratio) if vol_ratio == vol_ratio else 1.0,  # NaN-safe
-            rs_score=rs_points(rs_ranks.get(symbol, 0.0)),
-            tightness_score=tightness_score(df),
-            sector_trend=sector_trend_map.get(sector, "flat"),
+            rs_score=rs_points(rs_percentile),
+            tightness_score=tightness,
+            sector_trend=sector_trend,
         )
-        score = composite_score(features)
+        # No extension_pct here on purpose: price is still below the level, so
+        # there is no entry to have chased. The penalty applies at confirmation.
+        score = composite_score(features, **scoring_params(cfg.thresholds))
         if score < _WATCHLIST_MIN_SCORE:
             skipped["low_score"] += 1
             continue
 
+        # Every feature is stored as its own column, not just folded into the
+        # score: the pre-close scan reads them back onto the alert, and
+        # `alert_features` needs them to answer which signals actually predict
+        # an outcome. A score alone cannot be decomposed after the fact.
         setup_rows.append(
             {
                 "symbol": symbol,
@@ -246,6 +361,24 @@ def _run(store: Store, cfg: Config) -> int:
                 "score": score,
                 "detected_date": date.today().isoformat(),
                 "base_height": top.base_height,
+                "pattern_confidence": top.confidence,
+                "stage": Stage.STAGE_2.value,
+                "rs_percentile": rs_percentile,
+                "rs_points": features.rs_score,
+                "tightness": tightness,
+                "volume_ratio": features.volume_ratio,
+                "sector": sector,
+                "sector_trend": sector_trend,
+                "distance_pct": distance_pct * 100.0,
+                "adv_cr": qual.adv_cr,
+                "earnings_blackout": blackout,
+                "vix": mood["vix"],
+                "market_mood": mood["mood"],
+                "regime": regime.label,
+                "regime_score": regime.score,
+                "breadth_pct": regime.breadth_pct,
+                "nifty_trend": regime.nifty_trend,
+                "risk_multiplier": regime.risk_multiplier,
                 "notes": _format_notes(top.notes, qual.adv_cr, distance_pct),
             }
         )
@@ -259,6 +392,21 @@ def _run(store: Store, cfg: Config) -> int:
         logger.info(f"pruned {pruned} stale pullback entries")
 
     logger.info(f"skip summary: {skipped}")
+
+    # Which gates actually did anything today. Logged every run so a filter that
+    # quietly stops working surfaces the next morning, not at the next review.
+    logger.info(
+        render_audit(
+            audit_gates(
+                universe,
+                cfg.thresholds,
+                adv_rejected=adv_rejected,
+                symbols_checked=quality_checked,
+                earnings_symbols_checked=earnings_seen["checked"],
+                earnings_symbols_with_dates=earnings_seen["with_dates"],
+            )
+        )
+    )
     return len(setup_rows)
 
 
