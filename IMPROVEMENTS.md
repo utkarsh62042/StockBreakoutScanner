@@ -6,10 +6,13 @@ _From a full design review on 2026-09-12. Ordered by leverage, not effort._
 done (see [§ Done](#done) at the bottom for what they were and what the review
 got wrong).
 
-Remaining: the `atr_pct` half of #6 and the promoter-pledge half of #7 — both
-deliberately parked for want of a sign or a source, not forgotten — plus
-**#12 and #14 in Tier 3**. #15 Survivorship has been documented as per the
-review's recommendation. Next up is #12 (job-failure notification).
+**Deliberately parked:** #6 `atr_pct` and #7 promoter pledge. Neither blocks
+the system. #6 is logging; when enough trades settle (4–6 weeks), the data will
+say which direction to score it. #7 has no free source; a hand-curated blocklist
+is 80% as effective and requires zero maintenance.
+
+Open: **#12 and #14 in Tier 3**. #15 Survivorship has been documented as per the
+review's recommendation.
 
 **Combined effect of #4 and #5, measured.** For one mid-quality setup (pattern
 confidence 60, RS 7.5, tightness 0.5, flat sector) the old score was **71.5
