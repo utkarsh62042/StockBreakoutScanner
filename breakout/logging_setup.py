@@ -8,16 +8,17 @@ above by default; can be lifted to DEBUG via config).
 from __future__ import annotations
 
 import logging
-from datetime import date
 from pathlib import Path
 
 from rich.logging import RichHandler
+
+from breakout.analysis.session import today_ist
 
 
 def setup_logging(logs_dir: Path, level: str = "INFO", console: bool = True) -> None:
     """Configure root logger. Idempotent (replaces any existing handlers)."""
     logs_dir.mkdir(parents=True, exist_ok=True)
-    log_path = logs_dir / f"{date.today().isoformat()}.log"
+    log_path = logs_dir / f"{today_ist().isoformat()}.log"
 
     root = logging.getLogger()
     root.handlers.clear()

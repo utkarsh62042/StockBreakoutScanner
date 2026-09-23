@@ -80,6 +80,11 @@ def now_ist() -> datetime:
     return datetime.now(IST)
 
 
+def today_ist() -> date:
+    """Today's date in Asia/Kolkata, regardless of the machine's timezone."""
+    return now_ist().date()
+
+
 def minutes_into_session(at: datetime) -> int:
     """Minutes elapsed since the open, clamped to [0, SESSION_MINUTES]."""
     local = at.astimezone(IST) if at.tzinfo else at.replace(tzinfo=IST)

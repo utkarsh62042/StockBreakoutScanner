@@ -19,12 +19,11 @@ Run with:  python -m breakout.jobs.morning_scan
 from __future__ import annotations
 
 import logging
-from datetime import date
 
 from breakout.analysis.indicators import add_standard_indicators
 from breakout.analysis.patterns import detect_all
 from breakout.analysis.rs import period_return, rs_percentile_ranks, rs_points
-from breakout.analysis.session import drop_partial_bar
+from breakout.analysis.session import drop_partial_bar, today_ist
 from breakout.analysis.stage import Stage, classify_stage
 from breakout.analysis.tightness import tightness_score
 from breakout.config import Config, ensure_runtime_dirs, load_config
@@ -107,7 +106,7 @@ def main() -> int:
     setup_logging(cfg.paths.logs, level=cfg.logging.level, console=cfg.logging.console)
     logger.info("=" * 50)
     logger.info("morning_scan starting")
-    if not require_trading_day(date.today()):
+    if not require_trading_day(today_ist()):
         return 0
 
     with Store(cfg.paths.workbook) as store:
@@ -147,7 +146,7 @@ def _run(store: Store, cfg: Config) -> int:
     stale = [
         sym for sym in symbols
         if (latest := store.latest_price_date(sym)) is None
-        or (date.today() - latest).days >= 1
+        or (today_ist() - latest).days >= 1
     ]
     current = len(symbols) - len(stale)
     try:
@@ -330,7 +329,7 @@ def _run(store: Store, cfg: Config) -> int:
         tightness = tightness_score(df)
         sector_trend = sector_trend_map.get(sector, "flat")
         blackout = in_earnings_blackout(
-            date.today(), _earnings_dates(symbol, earnings_seen)
+            today_ist(), _earnings_dates(symbol, earnings_seen)
         )
         features = ScoringFeatures(
             quality_pass=True,
@@ -359,7 +358,7 @@ def _run(store: Store, cfg: Config) -> int:
                 "pattern": top.pattern_name,
                 "breakout_level": top.breakout_level,
                 "score": score,
-                "detected_date": date.today().isoformat(),
+                "detected_date": today_ist().isoformat(),
                 "base_height": top.base_height,
                 "pattern_confidence": top.confidence,
                 "stage": Stage.STAGE_2.value,

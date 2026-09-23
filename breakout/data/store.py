@@ -33,11 +33,13 @@ import math
 import os
 import time
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
 import pandas as pd
+
+from breakout.analysis.session import today_ist
 
 
 logger = logging.getLogger(__name__)
@@ -378,7 +380,7 @@ class Store:
         """Replace the universe sheet with the given rows."""
         if not rows:
             return 0
-        today = date.today().isoformat()
+        today = today_ist().isoformat()
         records = [
             {
                 "symbol": r["symbol"],
@@ -401,7 +403,7 @@ class Store:
         if df.empty or df["last_updated"].dropna().empty:
             return None
         last = pd.to_datetime(df["last_updated"].max()).date()
-        return (date.today() - last).days
+        return (today_ist() - last).days
 
     # ── Watchlists ───────────────────────────────────────────────────────
 
@@ -416,7 +418,7 @@ class Store:
         for r in rows:
             rec = {c: r.get(c) for c in cols}
             rec["symbol"] = r["symbol"]
-            rec["detected_date"] = r.get("detected_date") or date.today().isoformat()
+            rec["detected_date"] = r.get("detected_date") or today_ist().isoformat()
             records.append(rec)
         self._sheets["setup_watchlist"] = pd.DataFrame(records, columns=cols)
 
@@ -453,7 +455,7 @@ class Store:
         df = self._sheets["pullback_watchlist"]
         if df.empty:
             return 0
-        cutoff = (date.today() - pd.Timedelta(days=older_than_days)).isoformat()
+        cutoff = (today_ist() - timedelta(days=older_than_days)).isoformat()
         keep = df["breakout_date"].fillna("") >= cutoff
         removed = int((~keep).sum())
         self._sheets["pullback_watchlist"] = df[keep].reset_index(drop=True)

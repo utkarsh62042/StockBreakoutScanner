@@ -19,7 +19,6 @@ Run with:  python -m breakout.jobs.preclose_scan
 from __future__ import annotations
 
 import logging
-from datetime import date
 
 from breakout.analysis.indicators import atr
 from breakout.analysis.patterns import PatternMatch
@@ -27,6 +26,7 @@ from breakout.analysis.session import (
     is_partial_bar,
     now_ist,
     project_full_day_volume,
+    today_ist,
 )
 from breakout.analysis.stage import Stage
 from breakout.config import Config, ensure_runtime_dirs, load_config
@@ -66,7 +66,7 @@ def main() -> int:
     setup_logging(cfg.paths.logs, level=cfg.logging.level, console=cfg.logging.console)
     logger.info("=" * 50)
     logger.info("preclose_scan starting")
-    if not require_trading_day(date.today()):
+    if not require_trading_day(today_ist()):
         return 0
 
     with Store(cfg.paths.workbook) as store:
@@ -243,7 +243,7 @@ def _run(store: Store, cfg: Config) -> int:
             [
                 {
                     "symbol": symbol,
-                    "breakout_date": date.today().isoformat(),
+                    "breakout_date": today_ist().isoformat(),
                     "breakout_level": breakout_level,
                     "original_score": score,
                     "notes": f"pattern={row['pattern']}",
@@ -323,7 +323,7 @@ def _run(store: Store, cfg: Config) -> int:
         )
 
     # Dispatch
-    render_alerts_table(alerts, title=f"Pre-close alerts {date.today()}")
+    render_alerts_table(alerts, title=f"Pre-close alerts {today_ist()}")
     channels = build_channels(cfg)
     dispatch_alerts(alerts, channels)
 
@@ -503,7 +503,7 @@ def _record_features(
         {
             "trade_id": trade_id,
             "symbol": row.get("symbol"),
-            "alert_date": date.today().isoformat(),
+            "alert_date": today_ist().isoformat(),
             "alert_type": alert_type,
             "pattern": row.get("pattern"),
             "score": score,

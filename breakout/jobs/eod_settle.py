@@ -16,8 +16,8 @@ Run with:  python -m breakout.jobs.eod_settle
 from __future__ import annotations
 
 import logging
-from datetime import date
 
+from breakout.analysis.session import today_ist
 from breakout.config import Config, ensure_runtime_dirs, load_config
 from breakout.data.fetcher import FetchError, RateLimitError, make_fetcher
 from breakout.data.store import Store
@@ -41,7 +41,7 @@ def main() -> int:
     setup_logging(cfg.paths.logs, level=cfg.logging.level, console=cfg.logging.console)
     logger.info("=" * 50)
     logger.info("eod_settle starting")
-    if not require_trading_day(date.today()):
+    if not require_trading_day(today_ist()):
         return 0
 
     with Store(cfg.paths.workbook) as store:
@@ -58,7 +58,7 @@ def main() -> int:
 
 
 def _run(store: Store, cfg: Config) -> int:
-    today = date.today()
+    today = today_ist()
     open_trades = store.read_paper_trades_by_state(*OPEN_STATES)
     if not open_trades:
         logger.info("no open paper trades")

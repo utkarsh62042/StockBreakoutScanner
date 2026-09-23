@@ -32,6 +32,7 @@ from typing import Any
 
 import pandas as pd
 
+from breakout.analysis.session import today_ist
 from breakout.config import Config
 from breakout.paper.costs import settle_pnl
 
@@ -427,7 +428,7 @@ def insert_alert(
     position in a risk-off regime is still a 1R loss if it stops out — it just
     costs half as many rupees.
     """
-    alert_date = alert_date or date.today()
+    alert_date = alert_date or today_ist()
     entry = float(entry_price)
     stop = compute_stop(breakout_level, atr, cfg.paper_trading.atr_stop_multiplier)
     target_1, target_2 = compute_targets(

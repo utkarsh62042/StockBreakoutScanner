@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import argparse
 import logging
-from datetime import date, timedelta
+from datetime import timedelta
 
+from breakout.analysis.session import today_ist
 from breakout.output.digest import PerfStats, _num, _perf, compute_digest, render_digest
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,7 @@ def filter_period(trades: list[dict], period: str | None) -> list[dict]:
     if not period or period == "all":
         return trades
     days = int(str(period).rstrip("dD"))
-    cutoff = date.today() - timedelta(days=days)
+    cutoff = today_ist() - timedelta(days=days)
     out = []
     for t in trades:
         ed = t.get("exit_date")
