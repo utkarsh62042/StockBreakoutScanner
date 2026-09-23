@@ -2,14 +2,14 @@
 
 _From a full design review on 2026-09-12. Ordered by leverage, not effort._
 
-**Tier 1 and Tier 2 are now clear.** Twelve and a half of the fifteen items are
+**Tier 1, Tier 2, and #13 Timezone are complete.** 13.5 of the 15 items are
 done (see [§ Done](#done) at the bottom for what they were and what the review
 got wrong).
 
 Remaining: the `atr_pct` half of #6 and the promoter-pledge half of #7 — both
 deliberately parked for want of a sign or a source, not forgotten — plus
-**#12–#15 in Tier 3**, of which #15 the review itself concluded should be
-documented rather than solved. Next up is #12.
+**#12 and #14 in Tier 3**. #15 Survivorship has been documented as per the
+review's recommendation. Next up is #12 (job-failure notification).
 
 **Combined effect of #4 and #5, measured.** For one mid-quality setup (pattern
 confidence 60, RS 7.5, tightness 0.5, flat sector) the old score was **71.5
@@ -122,12 +122,39 @@ symptom of exactly this. Not urgent: `Store.save()` already writes atomically
 Still worth doing: **move `data_cache/` out of the OneDrive-synced folder**, so
 sync can't hold a lock mid-run.
 
-### 15. Survivorship in the universe
+### 15. Survivorship in the universe — documented 2026-09-23
 
 The `universe` sheet is overwritten weekly with today's NIFTY 500, and there's
 no point-in-time membership. This inflates backtest results and can't be fixed
-cheaply (historical index membership isn't freely available). Worth documenting
-rather than solving.
+cheaply (historical index membership isn't freely available). The review's
+own conclusion: document rather than solve.
+
+**What this means:** The backtest replays *all signals from today's NIFTY 500
+over history*, so every name in the sample survived and stayed in the index.
+Any company that:
+- was delisted or downgraded out of the NIFTY 500 during the lookback,
+- suffered a catastrophic decline that wiped out the setup,
+- went through a demerger or recapitalization mid-holding,
+
+...is absent from the backtest. The effect is one-directional: we see only the
+names that *didn't* collapse, inflating win rate and profit factor.
+
+**Why it's not fixed:** Historical point-in-time NIFTY 500 membership is not
+freely available. NSE publishes index changes (add/delete announcements) but
+doesn't provide a downloadable archive of past membership. Building one would
+require:
+- Scraping NSE announcements from 2024 onward,
+- Reconstructing the exact membership on each rebalance date,
+- Tying it to the price history (not trivial — a stock's symbol may change
+  across a delisting/relisting cycle).
+
+This is a data archaeology task, not a code change. The forward paper log
+(`paper_trades` table after 4–6 weeks of running) answers the survivorship
+question honestly because it contains only trades the live scanner actually
+took. **That is the real edge estimate.** The backtest is purely a regression
+check: "did the pipeline still fire as it did last week?"
+
+See `GUIDE.md` § 12 for the full list of backtest limitations.
 
 ---
 
