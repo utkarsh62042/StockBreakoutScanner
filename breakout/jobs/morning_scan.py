@@ -126,19 +126,20 @@ def main() -> int:
 
 def _run(store: Store, cfg: Config) -> int:
     # Idempotency check: avoid duplicate runs on the same day
-    today = today_ist().date()
-    recent_runs = store.read_run_log() or []
-
-    # Check if morning_scan already succeeded today
-    for run in recent_runs[-5:]:  # Check last 5 runs
-        if (run.get("job_name") == "morning_scan" and
-            run.get("status") == "SUCCESS" and
-            run.get("started_at", "").startswith(str(today))):
-            logger.warning(
-                f"morning_scan already completed successfully today ({today}). "
-                f"Run ID #{run.get('id')}. Skipping duplicate run."
-            )
-            return 0
+    today = today_ist()
+    df_runs = store._sheets.get("run_log")
+    if df_runs is not None and not df_runs.empty:
+        recent_runs = df_runs.tail(5).to_dict("records")
+        today_str = str(today)
+        for run in recent_runs:
+            if (run.get("job_name") == "morning_scan" and
+                run.get("status") == "SUCCESS" and
+                str(run.get("started_at", "")).startswith(today_str)):
+                logger.warning(
+                    f"morning_scan already completed successfully today ({today}). "
+                    f"Run ID #{run.get('id')}. Skipping duplicate run."
+                )
+                return 0
 
     # 1. Refresh universe (daily — aligned with pre-close scan for consistency)
     count, refreshed = refresh_universe_if_stale(store, refresh_days=1)
@@ -274,7 +275,7 @@ def _run(store: Store, cfg: Config) -> int:
         )
 
     # Portfolio health circuit breaker: stop opening new positions if in distress
-    portfolio_health = assess_portfolio_health(store, cfg, today_ist().date())
+    portfolio_health = assess_portfolio_health(store, cfg, today_ist())
     if not portfolio_health.is_healthy:
         logger.error(
             f"portfolio in distress — aborting scan. {portfolio_health.summary()}. "

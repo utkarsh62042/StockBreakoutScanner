@@ -1,0 +1,81 @@
+﻿[09/28/26 13:44:05] INFO     ==================================================
+                    INFO     morning_scan starting                             
+[09/28/26 13:44:06] INFO     fetching NIFTY 500 universe from                  
+                             https://archives.nseindia.com/content/indices/ind_
+                             nifty500list.csv                                  
+[09/28/26 13:44:07] INFO     universe refreshed: 501 symbols written           
+                    INFO     universe: 501 symbols (refreshed=True)            
+[09/28/26 13:44:15] INFO     market mood: VIX=13.7 neutral tradeable=True      
+                    INFO     fetching prices for 501 symbols via               
+                             YFinanceFetcher                                   
+[09/28/26 13:47:21] INFO     retrying 1 symbols individually                   
+[09/28/26 13:47:43] INFO     prices: fetched=500, failed=1, already-current=0  
+[09/28/26 13:47:47] WARNING  1 symbol(s) excluded — no bar for 2026-09-25:     
+[09/28/26 13:47:48] WARNING  HEGAM: -62.6% move on 2026-09-07 — unadjusted     
+                             corporate action, or a crash this strategy would  
+                             not trade either way; skipping while that bar is  
+                             in the window                                     
+[09/28/26 13:47:49] WARNING  IEX: -29.6% move on 2025-07-24 — unadjusted       
+                             corporate action, or a crash this strategy would  
+                             not trade either way; skipping while that bar is  
+                             in the window                                     
+[09/28/26 13:47:50] WARNING  POLICYBZR: -36.0% move on 2026-09-24 — unadjusted 
+                             corporate action, or a crash this strategy would  
+                             not trade either way; skipping while that bar is  
+                             in the window                                     
+[09/28/26 13:47:51] WARNING  TMPV: -40.2% move on 2025-10-14 — unadjusted      
+                             corporate action, or a crash this strategy would  
+                             not trade either way; skipping while that bar is  
+                             in the window                                     
+                    WARNING  TRENT: -33.0% move on 2026-01-01 — unadjusted     
+                             corporate action, or a crash this strategy would  
+                             not trade either way; skipping while that bar is  
+                             in the window                                     
+                    WARNING  VEDL: -64.9% move on 2026-04-30 — unadjusted      
+                             corporate action, or a crash this strategy would  
+                             not trade either way; skipping while that bar is  
+                             in the window                                     
+                    INFO     relative strength: ranked 494 symbols             
+                    INFO     regime: risk_off (score -2, size x0.50) —         
+                             nifty=down, breadth=29%, vix=neutral [nifty=-1,   
+                             breadth=-1, vix=+0]                               
+                    WARNING  risk-off regime — position sizes scaled to 50% of 
+                             normal today                                      
+                    ERROR    morning_scan failed                               
+                             Traceback (most recent call last):                
+                               File "C:\Users\kutkar01\OneDrive -              
+                             dentsu\Desktop\Personal\BreakoutStockAnalyser\brea
+                             kout\jobs\morning_scan.py", line 117, in main     
+                                 n = _run(store, cfg)                          
+                                     ^^^^^^^^^^^^^^^^                          
+                               File "C:\Users\kutkar01\OneDrive -              
+                             dentsu\Desktop\Personal\BreakoutStockAnalyser\brea
+                             kout\jobs\morning_scan.py", line 278, in _run     
+                                 portfolio_health =                            
+                             assess_portfolio_health(store, cfg,               
+                             today_ist().date())                               
+                                                                               
+                                      ^^^^^^^^^^^^^^^^                         
+                             AttributeError: 'datetime.date' object has no     
+                             attribute 'date'                                  
+python : Traceback (most recent call last):
+At line:1 char:383
++ ... koutStockAnalyser"; python -m breakout.jobs.morning_scan 2>&1 | tee - ...
++                         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\kutkar01\OneDrive - dentsu\Desktop\Personal\BreakoutStockAnalyser\breakout\jobs\morning_scan.py", 
+line 471, in <module>
+    main()
+  File "C:\Users\kutkar01\OneDrive - dentsu\Desktop\Personal\BreakoutStockAnalyser\breakout\jobs\morning_scan.py", 
+line 117, in main
+    n = _run(store, cfg)
+        ^^^^^^^^^^^^^^^^
+  File "C:\Users\kutkar01\OneDrive - dentsu\Desktop\Personal\BreakoutStockAnalyser\breakout\jobs\morning_scan.py", 
+line 278, in _run
+    portfolio_health = assess_portfolio_health(store, cfg, today_ist().date())
+                                                           ^^^^^^^^^^^^^^^^
+AttributeError: 'datetime.date' object has no attribute 'date'
