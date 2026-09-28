@@ -1,0 +1,6 @@
+# Telegram notifications support
+# Install with: pip install -r requirements.txt -r requirements-telegram.txt
+
+-r requirements.txt
+
+python-telegram-bot>=21.0

@@ -10,6 +10,11 @@ risk:
   risk_per_trade_pct: 1.0
   max_concurrent_positions: 8
   max_positions_per_sector: 3
+  # Circuit breakers for portfolio health — no new positions opened if triggered
+  max_portfolio_loss_pct_daily: 3.0    # Stop if down >3% today (FII selling stress)
+  max_portfolio_loss_pct_monthly: 10.0 # Stop if down >10% this month (reset next month)
+  # Market stress scaling: reduce position size below baseline when VIX/breadth deteriorates
+  scale_positions_in_market_stress: true
 
 scoring_weights:
   pattern_quality: 35
@@ -38,9 +43,15 @@ pivots:
 
 patterns:
   enabled:
-    - fifty_two_week_high
-    - darvas_box
-    - nr7
+    - fifty_two_week_high        # 52-week high breakout with resistance touches
+    - darvas_box                 # Box breakout (parallel highs and lows)
+    - nr7                        # Narrow range (NR7) compression breakout
+    - inside_bar                 # Inside bar (range contraction) breakout
+    - bollinger_squeeze          # Bollinger band squeeze (volatility contraction)
+    - ascending_triangle         # Ascending triangle (bullish accumulation)
+    - vcp                        # Volatility Contraction Pattern
+    - cup_and_handle             # Cup & Handle formation
+    - flag                       # Flag pattern (short-term consolidation)
 
 stage_filter:
   sma_weeks: 30

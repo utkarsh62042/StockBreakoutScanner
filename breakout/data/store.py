@@ -33,7 +33,7 @@ import math
 import os
 import time
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -90,7 +90,7 @@ _SCHEMAS: dict[str, list[str]] = {
         "target_2", "exit_date", "exit_price", "shares", "pnl_inr", "pnl_r",
         "gross_pnl_inr", "costs_inr",
         "days_held", "days_in_trade", "daily_moves", "max_favorable",
-        "max_adverse", "notes",
+        "max_adverse", "notes", "retested",
     ],
     "failed_breakouts": [
         "symbol", "breakout_date", "failure_date", "pattern", "original_score",
@@ -621,6 +621,13 @@ class Store:
 # is idempotent (once re-based the ratio is 1, so nothing happens again).
 # Prices and volume get their own factor because a split moves both (inversely)
 # while a dividend adjustment moves only prices.
+#
+# ⚠️  EDGE CASES (Issue 5.3):
+# - Demergers / capital reductions (common on NSE): re-basing fails because
+#   feed doesn't model these as splits. Result is phantom -60% bar that breaks
+#   the 52-week high. Defense: `data.validate.find_price_discontinuity` flags it.
+# - Complex corporate actions (rights, sub-division): median-ratio approach is
+#   robust for splits/bonuses but may need manual adjustment for multi-step actions.
 
 #: Overlapping bars required before a ratio is trusted — one shared date could
 #: be a one-off feed correction rather than a re-adjustment.

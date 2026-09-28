@@ -544,28 +544,72 @@ def fetch_yf_index(symbol: str, days: int = 90) -> pd.Series | None:
 
 
 def fetch_earnings_dates(symbol: str, suffix: str = ".NS", limit: int = 8) -> list[date]:
-    """Best-effort recent + upcoming earnings dates for `symbol` via yfinance.
+    """Fetch recent + upcoming earnings dates for `symbol`.
 
-    Returns [] on any failure or missing data (earnings coverage for Indian
-    names is patchy — the blackout filter treats [] as "not in blackout").
+    Tries multiple sources in order:
+    1. yfinance (limited NSE coverage, but worth a try)
+    2. Local CSV fallback at `earnings_calendar.csv` if it exists
+    3. Returns [] if none available (blackout filter treats as "not in blackout")
+
+    ⚠️  WARNING: yfinance has ~no earnings coverage for NSE stocks (verified:
+    RELIANCE, TCS, INFY all return []). For production use, integrate with:
+    - NSE announcements API (https://archives.nseindia.com/)
+    - Screener.in API (free tier available)
+    - Manual CSV: earnings_calendar.csv in project root
+
+    Returns [] on any failure or missing data.
     """
+    out: list[date] = []
+
+    # Try 1: yfinance (will likely fail for NSE stocks)
     try:
         import yfinance as yf
 
         ticker = symbol if symbol.endswith(suffix) else f"{symbol}{suffix}"
         df = yf.Ticker(ticker).get_earnings_dates(limit=limit)
-        if df is None or len(df) == 0:
-            return []
-        out: list[date] = []
-        for ts in df.index:
-            try:
-                out.append(pd.Timestamp(ts).date())
-            except (TypeError, ValueError):
-                continue
-        return out
+        if df is not None and len(df) > 0:
+            for ts in df.index:
+                try:
+                    out.append(pd.Timestamp(ts).date())
+                except (TypeError, ValueError):
+                    continue
+            if out:
+                logger.debug(f"{symbol}: {len(out)} earnings dates from yfinance")
+                return out
     except Exception as e:
-        logger.debug(f"earnings fetch failed for {symbol}: {e}")
-        return []
+        logger.debug(f"yfinance earnings fetch failed for {symbol}: {e}")
+
+    # Try 2: Local CSV fallback
+    # Create earnings_calendar.csv with columns: symbol, date (YYYY-MM-DD)
+    try:
+        from pathlib import Path
+        csv_path = Path(__file__).resolve().parent.parent.parent / "earnings_calendar.csv"
+        if csv_path.exists():
+            import csv
+            with open(csv_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row.get("symbol", "").strip().upper() == symbol.upper():
+                        try:
+                            ed = pd.to_datetime(row.get("date")).date()
+                            if ed >= date.today() - timedelta(days=60):  # Last 60 days
+                                out.append(ed)
+                        except (ValueError, TypeError):
+                            continue
+            if out:
+                logger.debug(
+                    f"{symbol}: {len(out)} earnings dates from CSV fallback"
+                )
+                return sorted(out)
+    except Exception as e:
+        logger.debug(f"CSV fallback earnings fetch failed: {e}")
+
+    # No data found
+    logger.debug(
+        f"{symbol}: no earnings dates found. "
+        f"For production, add earnings_calendar.csv or integrate NSE API."
+    )
+    return []
 
 
 def make_fetcher(cfg: Config) -> DataFetcher:

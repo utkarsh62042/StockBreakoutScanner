@@ -18,6 +18,13 @@ provided for anyone who wants the raw RS number.
 
 Scoring (per the spec): rank >= 75 earns the full 15 points; between 50 and 75
 it scales linearly; at or below 50 it earns nothing.
+
+⚠️  LIMITATIONS (Issue 5.2):
+- Single lookback window (63 days) may miss regime changes
+- If market has been down for 200 days, top 25% might still be negative
+- Better: use multi-window RS (63d, 126d, 252d) with recent bias
+- Surviv orship: delisted stocks excluded (good), but delayed adjustment to
+  universe composition changes (see universe.py refresh frequency)
 """
 
 from __future__ import annotations

@@ -1,16 +1,17 @@
-"""Pre-close scan — runs at 3:00 PM IST.
+"""Pre-close scan — runs at 3:20 PM IST.
 
 Re-fetches the latest day's data for every symbol on the setup_watchlist
-and checks for actual breakout confirmation:
+and checks for actual breakout confirmation at 3:20 PM:
 
     close > breakout_level  AND  today_volume >= 1.5 × 20-day average
 
 Confirmed breakouts:
   - emit an `ALERT: BREAKOUT` row through every active output channel
-  - open a paper trade in ENTERED state at the price observed by this scan,
-    matching the real execution: the trader buys in the 3:00–3:20 PM window
-    on the confirmation day. Entry, stop, targets and position size are all
-    derived from that same price, so the quoted R:R is obtainable.
+  - open a paper trade in ENTERED state at the price at 3:25 PM IST (5 minutes
+    after scan for your manual execution), matching real execution: the trader
+    buys in the 3:20–3:25 PM window on the confirmation day. Entry, stop,
+    targets and position size are all derived from the confirmed price, so the
+    quoted R:R is obtainable.
   - add to the pullback watchlist so future retests can be flagged
 
 Run with:  python -m breakout.jobs.preclose_scan
@@ -30,9 +31,13 @@ from breakout.analysis.session import (
 )
 from breakout.analysis.stage import Stage
 from breakout.config import Config, ensure_runtime_dirs, load_config
+from datetime import timedelta
+
 from breakout.data.fetcher import FetchError, RateLimitError, make_fetcher
 from breakout.data.store import Store
+from breakout.data.universe import refresh_universe_if_stale
 from breakout.data.validate import is_continuous
+from breakout.trading_calendar import active_holidays, is_trading_day
 from breakout.logging_setup import setup_logging
 from breakout.output.alerts import (
     Alert,
@@ -45,6 +50,7 @@ from breakout.filters.concentration import (
     log_rejections,
     select_within_limits,
 )
+from breakout.filters.portfolio import should_scale_position_for_market_stress
 from breakout.paper.tracker import (
     OPEN_STATES,
     compute_stop,
@@ -83,6 +89,28 @@ def main() -> int:
 
 
 def _run(store: Store, cfg: Config) -> int:
+    # Idempotency check: avoid duplicate runs on the same day
+    today = today_ist().date()
+    recent_runs = store.read_run_log() or []
+
+    # Check if preclose_scan already succeeded today
+    for run in recent_runs[-5:]:  # Check last 5 runs
+        if (run.get("job_name") == "preclose_scan" and
+            run.get("status") == "SUCCESS" and
+            run.get("started_at", "").startswith(str(today))):
+            logger.warning(
+                f"preclose_scan already completed successfully today ({today}). "
+                f"Run ID #{run.get('id')}. Skipping duplicate run."
+            )
+            return 0
+
+    # Refresh universe daily to catch newly indexed symbols
+    count, refreshed = refresh_universe_if_stale(store, refresh_days=1)
+    if refreshed:
+        logger.info(f"universe refreshed: {count} symbols")
+    else:
+        logger.debug(f"universe cache current: {count} symbols")
+
     setup = store.read_setup_watchlist()
     if not setup:
         logger.info("setup_watchlist is empty — nothing to confirm")
@@ -97,6 +125,21 @@ def _run(store: Store, cfg: Config) -> int:
     # a market-wide fact for the day, so reading it back is both cheap and
     # correct; rows written before the regime gate existed size at 1.0.
     risk_mult = _risk_multiplier(setup, cfg)
+
+    # Additional market stress scaling if enabled: reduces position size in
+    # high-VIX or narrow-breadth environments (FII selling, regime shifts)
+    if cfg.risk.scale_positions_in_market_stress:
+        # Read the regime info from the setup watchlist rows
+        vix = _vix_from_setup(setup)
+        breadth = _breadth_from_setup(setup)
+        regime_label = _regime_label_from_setup(setup)
+        stress_scale = should_scale_position_for_market_stress(vix, breadth, regime_label)
+        if stress_scale < 1.0:
+            logger.warning(
+                f"market stress scaling active: position sizes scaled to "
+                f"{stress_scale:.0%} (VIX={vix}, breadth={breadth}%)"
+            )
+            risk_mult *= stress_scale
 
     for row in setup:
         symbol = row["symbol"]
@@ -178,13 +221,33 @@ def _run(store: Store, cfg: Config) -> int:
     )
     log_rejections(rejected)
 
+    today = today_ist()
+    is_friday = today.weekday() == 4  # 0=Mon, 4=Fri
+
+    # If Friday, check if it's a holiday-shortened week (Monday is not a trading day)
+    is_multi_day_gap = False
+    if is_friday:
+        monday = today + timedelta(days=3)  # Friday + 3 days = Monday
+        is_multi_day_gap = not is_trading_day(monday, active_holidays())
+
     for cand in accepted:
         p = cand.payload
         row, close, breakout_level = p["row"], p["close"], p["breakout_level"]
         atr_14, vol_ratio, score = p["atr_14"], p["vol_ratio"], cand.score
         symbol = cand.symbol
 
-        stop = compute_stop(breakout_level, atr_14, cfg.paper_trading.atr_stop_multiplier)
+        # Gate Friday entries: weekend gap risk. Use 2.5x ATR (regular Friday) or 3.5x ATR (holiday-shortened week)
+        normal_mult = cfg.paper_trading.atr_stop_multiplier
+        if is_friday:
+            atr_mult = 3.5 if is_multi_day_gap else 2.5
+            gap_type = "3+ day gap (Monday holiday)" if is_multi_day_gap else "weekend gap"
+            logger.warning(
+                f"{symbol}: Friday entry with {gap_type} (stop: {atr_mult}x ATR={atr_14*atr_mult:.2f} vs "
+                f"normal {normal_mult}x ATR={atr_14*normal_mult:.2f})"
+            )
+        else:
+            atr_mult = normal_mult
+        stop = compute_stop(breakout_level, atr_14, atr_mult)
         target_1, target_2 = compute_targets(
             close, stop, float(row.get("base_height") or 0), cfg.paper_trading.target_1_r_multiple
         )
@@ -252,11 +315,24 @@ def _run(store: Store, cfg: Config) -> int:
         )
 
     # ── Pullback entries: a recent breakout retests its level and holds ──────
+    # Prune old breakouts that have aged out of the retest window
+    pruned = store.prune_pullback_watchlist(cfg.thresholds.pullback_window_days)
+    if pruned > 0:
+        logger.info(f"pruned {pruned} stale breakouts from pullback watchlist")
+
     for row in store.read_pullback_watchlist():
         symbol = row["symbol"]
         level = float(row["breakout_level"]) if row.get("breakout_level") else 0.0
         if level <= 0:
             continue
+
+        # Skip if a pullback entry already fired for this exact breakout level
+        existing_pullback = _has_existing_pullback_entry(store, symbol, level)
+        if existing_pullback:
+            logger.debug(f"skip {symbol} @ {level:.2f}: pullback entry already fired")
+            store.remove_pullback(symbol)
+            continue
+
         try:
             df = fetcher.fetch_history(symbol, days=60)
             store.upsert_prices(symbol, df)
@@ -286,7 +362,12 @@ def _run(store: Store, cfg: Config) -> int:
         close = float(df["close"].iloc[-1])
         vol_ratio = _volume_ratio(df)
         atr_14 = float(atr(df, 14).iloc[-1])
-        stop = compute_stop(level, atr_14, cfg.paper_trading.atr_stop_multiplier)
+        # Friday pullback entries also get wider stop for weekend/multi-day gap protection
+        if is_friday:
+            atr_mult = 3.5 if is_multi_day_gap else 2.5
+        else:
+            atr_mult = cfg.paper_trading.atr_stop_multiplier
+        stop = compute_stop(level, atr_14, atr_mult)
         target_1, target_2 = compute_targets(
             close, stop, close - level, cfg.paper_trading.target_1_r_multiple
         )
@@ -321,6 +402,8 @@ def _run(store: Store, cfg: Config) -> int:
             breakout_level=level, vol_ratio=vol_ratio, atr_14=atr_14,
             bar=df.iloc[-1], risk_multiplier=risk_mult,
         )
+        # Remove from watchlist to prevent re-triggering on subsequent days
+        store.remove_pullback(symbol)
 
     # Dispatch
     render_alerts_table(alerts, title=f"Pre-close alerts {today_ist()}")
@@ -548,19 +631,73 @@ def _record_features(
 _PULLBACK_TOUCH_PCT = 0.01
 
 
+def _has_existing_pullback_entry(store: Store, symbol: str, level: float) -> bool:
+    """Check if a PULLBACK_ENTRY alert already fired for this symbol at this level
+    (regardless of whether it's still open or closed). Allows multiple pullback
+    entries for the same symbol if they're at different breakout levels."""
+    trades = store.read_paper_trades_by_state()  # All trades, any state
+    for trade in trades:
+        if (trade.get("symbol") == symbol and
+            trade.get("alert_type") == "PULLBACK_ENTRY" and
+            abs(float(trade.get("breakout_level") or 0) - level) < 0.01):  # Within 1 paisa
+            return True
+    return False
+
+
 def _is_pullback_entry(df, level: float, touch_pct: float = _PULLBACK_TOUCH_PCT) -> bool:
     """Retest-and-hold: today's low dipped to the breakout level (within
     `touch_pct` above it) but price closed back above the level on a reversal
-    candle (longer lower wick than body, or an up close)."""
+    candle with sufficient strength (must close in upper half of range or well
+    above the level to confirm institutional support)."""
     o = float(df["open"].iloc[-1])
     c = float(df["close"].iloc[-1])
     low = float(df["low"].iloc[-1])
+    high = float(df["high"].iloc[-1])
+
     touched = level <= low <= level * (1.0 + touch_pct)
     above = c > level
     body = abs(c - o)
     lower_wick = min(o, c) - low
     reversal = lower_wick > body or c > o
-    return touched and above and reversal
+
+    # Additional strength requirements to avoid false positives on weak closes
+    # Require either: (a) close in upper 50% of range, OR (b) close >= 1% above level
+    daily_range = high - low
+    close_position = (c - low) / daily_range if daily_range > 0 else 0
+    close_above_level = c - level
+    min_close_distance = level * 0.01  # 1% above level for confirmation
+
+    # Either: close in upper half of range (>=50%), or close at least 1% above the level
+    strong_close = close_position >= 0.5 or close_above_level >= min_close_distance
+
+    return touched and above and reversal and strong_close
+
+
+def _vix_from_setup(setup: list[dict]) -> float | None:
+    """Extract India VIX level from first setup row (same for all rows)."""
+    for row in setup:
+        v = _num(row.get("vix"))
+        if v > 0:
+            return v
+    return None
+
+
+def _breadth_from_setup(setup: list[dict]) -> float | None:
+    """Extract market breadth % from first setup row."""
+    for row in setup:
+        b = _num(row.get("breadth_pct"))
+        if b is not None and b >= 0:
+            return b
+    return None
+
+
+def _regime_label_from_setup(setup: list[dict]) -> str | None:
+    """Extract regime label from first setup row."""
+    for row in setup:
+        r = str(row.get("regime") or "").strip()
+        if r and r.lower() in ("risk_on", "neutral", "risk_off"):
+            return r.lower()
+    return None
 
 
 if __name__ == "__main__":

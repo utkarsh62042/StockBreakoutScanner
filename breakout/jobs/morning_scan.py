@@ -10,8 +10,9 @@ scans every symbol through:
     5. Composite scoring
 
 Symbols scoring at least 50 with a pattern and near-breakout proximity land
-on the setup_watchlist. The pre-close scan re-checks these for actual
-breakout confirmation (close > level AND volume >= 1.5x).
+on the setup_watchlist. The pre-close scan at 3:20 PM re-checks these for
+actual breakout confirmation (close > level AND volume >= 1.5x), and if
+confirmed, you execute the entry at 3:25 PM IST.
 
 Run with:  python -m breakout.jobs.morning_scan
 """
@@ -39,6 +40,7 @@ from breakout.data.validate import is_continuous
 from breakout.filters.earnings import in_earnings_blackout
 from breakout.filters.gate_audit import audit_gates, render_audit
 from breakout.filters.mood import assess_market, classify_sector, fetch_sector_trends
+from breakout.filters.portfolio import assess_portfolio_health, should_scale_position_for_market_stress
 from breakout.filters.quality import check_quality
 from breakout.filters.regime import assess_regime, market_breadth, pct_above_sma
 from breakout.logging_setup import setup_logging
@@ -123,8 +125,23 @@ def main() -> int:
 
 
 def _run(store: Store, cfg: Config) -> int:
-    # 1. Refresh universe (weekly)
-    count, refreshed = refresh_universe_if_stale(store)
+    # Idempotency check: avoid duplicate runs on the same day
+    today = today_ist().date()
+    recent_runs = store.read_run_log() or []
+
+    # Check if morning_scan already succeeded today
+    for run in recent_runs[-5:]:  # Check last 5 runs
+        if (run.get("job_name") == "morning_scan" and
+            run.get("status") == "SUCCESS" and
+            run.get("started_at", "").startswith(str(today))):
+            logger.warning(
+                f"morning_scan already completed successfully today ({today}). "
+                f"Run ID #{run.get('id')}. Skipping duplicate run."
+            )
+            return 0
+
+    # 1. Refresh universe (daily — aligned with pre-close scan for consistency)
+    count, refreshed = refresh_universe_if_stale(store, refresh_days=1)
     if not count:
         logger.error("universe is empty — aborting scan")
         return 0
@@ -173,19 +190,36 @@ def _run(store: Store, cfg: Config) -> int:
     required_bar = last_completed_session()
     fresh: set[str] = set()
     stale_symbols: list[str] = []
+    stale_by_age: dict[str, int] = {}  # Track staleness age for diagnosis
+
     for sym in symbols:
         latest = store.latest_price_date(sym)
         if latest is not None and latest >= required_bar:
             fresh.add(sym)
         else:
             stale_symbols.append(sym)
+            if latest is not None:
+                age = (today_ist() - latest).days
+                stale_by_age[sym] = age
+
     if stale_symbols:
+        # Group by staleness for better diagnostics
+        very_stale = [s for s in stale_symbols if stale_by_age.get(s, 0) >= 7]
+        moderately_stale = [s for s in stale_symbols if 1 <= stale_by_age.get(s, 0) < 7]
+
         logger.warning(
-            f"{len(stale_symbols)} symbol(s) excluded — no bar for "
-            f"{required_bar}, so any signal would come from old prices: "
-            f"{', '.join(sorted(stale_symbols)[:10])}"
-            f"{' ...' if len(stale_symbols) > 10 else ''}"
+            f"{len(stale_symbols)} symbol(s) excluded — no bar for {required_bar}:"
         )
+        if very_stale:
+            logger.warning(
+                f"  - Very stale (>=7 days): {len(very_stale)} symbols "
+                f"({', '.join(sorted(very_stale)[:5])}{'...' if len(very_stale) > 5 else ''})"
+            )
+        if moderately_stale:
+            logger.warning(
+                f"  - Moderately stale (1-6 days): {len(moderately_stale)} symbols "
+                f"({', '.join(sorted(moderately_stale)[:5])}{'...' if len(moderately_stale) > 5 else ''})"
+            )
 
     # 2b. Cross-sectional pre-pass: 63-day returns → relative-strength ranks,
     #     and a sector-trend proxy from those returns.
@@ -238,6 +272,18 @@ def _run(store: Store, cfg: Config) -> int:
             f"risk-off regime — position sizes scaled to "
             f"{regime.risk_multiplier:.0%} of normal today"
         )
+
+    # Portfolio health circuit breaker: stop opening new positions if in distress
+    portfolio_health = assess_portfolio_health(store, cfg, today_ist().date())
+    if not portfolio_health.is_healthy:
+        logger.error(
+            f"portfolio in distress — aborting scan. {portfolio_health.summary()}. "
+            f"Reasons: {'; '.join(portfolio_health.reasons)}"
+        )
+        store.finish_run(run_id, "ABORTED_PORTFOLIO_DISTRESS", error_message=portfolio_health.summary())
+        return 0
+    if portfolio_health.daily_loss_pct is not None or portfolio_health.monthly_loss_pct is not None:
+        logger.info(f"portfolio health: {portfolio_health.summary()}")
     if discontinuous:
         logger.warning(
             f"{len(discontinuous)} symbol(s) excluded for price discontinuity: "

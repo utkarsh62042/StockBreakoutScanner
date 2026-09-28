@@ -38,7 +38,10 @@ _BROWSER_HEADERS = {
 }
 
 # Universe is refreshed if cached version is older than this many days.
-DEFAULT_REFRESH_DAYS = 7
+# Changed from 7 to 2 days to minimize risk of trading delisted or rotated-out
+# constituents. NIFTY 500 constituents can change quarterly, but NSE often
+# announces changes 1-2 weeks in advance. 2-day refresh is a safe middle ground.
+DEFAULT_REFRESH_DAYS = 2
 
 
 def refresh_universe_if_stale(

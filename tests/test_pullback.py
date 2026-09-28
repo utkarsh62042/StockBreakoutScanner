@@ -22,8 +22,9 @@ def test_retest_up_close_is_entry() -> None:
 
 
 def test_retest_long_lower_wick_is_entry() -> None:
-    # Down-close bar, but a long lower wick shows the retest was bought.
-    assert _is_pullback_entry(_bar(o=101.0, h=101.5, low=100.0, c=100.6), LEVEL) is True
+    # Down-close bar with long lower wick, close in upper 50% of range shows retest was bought.
+    # Range = 1.5, close at 100.75 = 50% of range (exactly meets threshold)
+    assert _is_pullback_entry(_bar(o=101.0, h=101.5, low=100.0, c=100.75), LEVEL) is True
 
 
 def test_never_reached_level_not_entry() -> None:
@@ -43,3 +44,32 @@ def test_no_reversal_not_entry() -> None:
 
 def test_close_below_level_not_entry() -> None:
     assert _is_pullback_entry(_bar(o=101.0, h=101.5, low=100.5, c=99.0), LEVEL) is False
+
+
+def test_retest_1pct_above_level_is_entry() -> None:
+    # Close exactly 1% above level (meets absolute distance threshold).
+    # Even with weak close position, the 1% distance rule applies.
+    assert _is_pullback_entry(_bar(o=100.5, h=101.5, low=100.0, c=101.0), LEVEL) is True
+
+
+def test_retest_weak_close_rejected() -> None:
+    # Close 0.5% above level with only 40% of range (both fail thresholds).
+    # Range = 1.5, close at 100.5 = 33% of range (needs 50%)
+    # 0.5% above level (needs 1%)
+    assert _is_pullback_entry(_bar(o=101.0, h=101.5, low=100.0, c=100.5), LEVEL) is False
+
+
+def test_tight_consolidation_held() -> None:
+    # Tight consolidation with strong close position validates institutional support.
+    # Range = 0.10, close at 100.08 = 80% of range (well above 50%)
+    assert _is_pullback_entry(_bar(o=100.05, h=100.10, low=100.0, c=100.08), 100.0) is True
+
+
+def test_low_price_stock_1pct_threshold() -> None:
+    # Low-priced stocks: close 1% above level (₹10 → ₹10.10) passes.
+    assert _is_pullback_entry(_bar(o=10.05, h=10.15, low=10.0, c=10.10), 10.0) is True
+
+
+def test_high_price_stock_1pct_threshold() -> None:
+    # High-priced stocks: close 1% above level (₹500 → ₹505) passes.
+    assert _is_pullback_entry(_bar(o=502.5, h=507.5, low=500.0, c=505.0), 500.0) is True

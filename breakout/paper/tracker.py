@@ -3,10 +3,11 @@
 Every alert the scanner emits becomes a virtual position in the SQLite
 `paper_trades` table. The state machine:
 
-    ENTERED        — position is open at `entry_price`, the price at the
-                     3:00 PM pre-close scan that confirmed the breakout. This
-                     is the price the trader actually pays, entering in the
-                     3:00–3:20 PM window on the confirmation day itself.
+    ENTERED        — position is open at `entry_price`, the price at 3:25 PM IST
+                     when you execute the confirmed breakout from the 3:20 PM
+                     pre-close scan. This is the price the trader actually pays,
+                     entering in the 3:20–3:25 PM window on the confirmation day
+                     itself (allowing 5 minutes from alert to execution).
                      Transitions to TARGET_1_HIT, TARGET_HIT, STOPPED_OUT,
                      or TIME_EXIT.
     TARGET_1_HIT   — first target hit (partial); position remains open
@@ -86,6 +87,13 @@ def position_size(
     Returns 0 if the trade has zero risk (which would imply an entry at the
     stop — not a legitimate setup).
 
+    **Note on rounding:** Shares are rounded down to integers. This may leave
+    ₹500-1,000 of unused capital per trade due to rounding. Over 8 concurrent
+    positions, this is immaterial but worth noting for precise capital tracking.
+    NSE lot sizes are typically 1 share (most stocks), but some require larger
+    minimum orders — the scanner doesn't model this, so paper results may
+    differ from live execution on odd-lot stocks.
+
     **`max_value` is not optional in practice.** Pure risk-based sizing has no
     notion of what a position *costs*, only of what it can lose, and the two
     diverge violently when the stop is tight:
@@ -120,6 +128,53 @@ def compute_stop(breakout_level: float, atr: float, multiplier: float = 1.5) -> 
     position size, targets, R:R — uses the entry price instead.
     """
     return breakout_level - multiplier * atr
+
+
+def validate_trade_levels(
+    entry: float,
+    stop: float,
+    target_1: float,
+    target_2: float,
+    min_spread_pct: float = 0.05,
+) -> tuple[bool, str]:
+    """Validate that trade prices are sensible and tradeable.
+
+    Checks:
+    - All prices > 0
+    - Stop < entry (for long trades)
+    - Targets > entry
+    - Adequate spread between entry and stop (>= min_spread_pct)
+
+    Args:
+        entry: Entry price
+        stop: Stop-loss price
+        target_1: First target
+        target_2: Second target
+        min_spread_pct: Minimum distance between entry and stop (%)
+
+    Returns:
+        (is_valid, reason)
+    """
+    if entry <= 0 or stop <= 0 or target_1 <= 0 or target_2 <= 0:
+        return False, "All prices must be positive"
+
+    if stop >= entry:
+        return False, f"Stop (₹{stop:.2f}) must be below entry (₹{entry:.2f})"
+
+    if target_1 <= entry:
+        return False, f"Target 1 (₹{target_1:.2f}) must be above entry (₹{entry:.2f})"
+
+    if target_2 <= entry:
+        return False, f"Target 2 (₹{target_2:.2f}) must be above entry (₹{entry:.2f})"
+
+    spread_pct = (entry - stop) / entry * 100.0
+    if spread_pct < min_spread_pct:
+        return (
+            False,
+            f"Stop too close: {spread_pct:.2f}% spread < {min_spread_pct}% minimum",
+        )
+
+    return True, "OK"
 
 
 def compute_targets(
@@ -290,6 +345,43 @@ class TradeOutcome:
     notes: str = ""
 
 
+def _apply_slippage_to_stop(
+    stop_loss: float,
+    today_open: float,
+    today_low: float,
+    slippage_pct: float = 0.5,
+) -> tuple[float, bool]:
+    """Calculate realistic fill price on stop-loss hit, accounting for slippage.
+
+    On gap-down breaks, the position is filled at available liquidity, which is
+    typically worse than the exact stop price:
+    - If gap opens below stop: fill is typically 30-50 bps below the open
+    - If intraday breach: fill is typically near the stop but can be worse
+
+    Args:
+        stop_loss: Configured stop-loss price
+        today_open: Today's opening price
+        today_low: Today's low price
+        slippage_pct: Expected slippage in basis points / 100 (default 50 bps)
+
+    Returns:
+        (fill_price, was_gapped): Realistic fill price and whether it gapped
+    """
+    gapped = today_open < stop_loss
+
+    if gapped:
+        # Gap down: fill is at the low (or slightly worse with slippage buffer)
+        slippage_amount = stop_loss * slippage_pct / 100.0
+        # Worst-case fill: at the low but with slippage
+        fill_price = min(today_low, today_open - slippage_amount)
+        return fill_price, True
+    else:
+        # Intraday breach: fill at stop with small slippage buffer
+        slippage_amount = stop_loss * slippage_pct / 100.0
+        fill_price = stop_loss - slippage_amount
+        return fill_price, False
+
+
 def settle_one_trade(
     trade: dict,
     today_ohlc: dict,
@@ -300,6 +392,10 @@ def settle_one_trade(
 
     Returns None if no transition is required today (e.g. trade is still
     progressing within its bounds).
+
+    Stop-loss settlement includes slippage modeling: gap-downs are filled at
+    realistic prices (the low or below), not at the perfect stop price. This
+    matches real execution where stops often get worse fills on gap-down events.
     """
     state = trade["state"]
     if state in CLOSED_STATES:
@@ -351,20 +447,19 @@ def settle_one_trade(
             notes=notes,
         )
 
-    # 1. Stop hit. A fill exactly at the stop is only available if the stop was
-    # reached during the session; if the bar OPENED below it the position gaps
-    # through and the real fill is the open. Gap-downs on bad news are the main
-    # source of the fat left tail on NSE, and assuming a fill at the stop
-    # overstates R on precisely the trades that hurt most.
+    # 1. Stop hit with slippage modeling
+    # Gap-downs on bad news are the main source of the fat left tail on NSE.
+    # Rather than assume perfect execution at the stop, model realistic slippage:
+    # - Gap down (open < stop): fill at the low with slippage buffer
+    # - Intraday breach: fill at stop minus slippage buffer
     if today_low <= stop_loss:
         today_open = float(today_ohlc["open"])
-        exit_price = min(stop_loss, today_open)
-        gapped = today_open < stop_loss
-        return _close_at(
-            exit_price,
-            TradeState.STOPPED_OUT,
-            f"stop_gap_open:{exit_price:.2f}" if gapped else "stop_hit_intraday",
+        slippage_bps = cfg.costs.slippage_pct if cfg.costs.enabled else 0.5
+        exit_price, gapped = _apply_slippage_to_stop(
+            stop_loss, today_open, today_low, slippage_pct=slippage_bps
         )
+        gap_note = f"gap_down_fill:{exit_price:.2f}" if gapped else f"stop_hit:{exit_price:.2f}"
+        return _close_at(exit_price, TradeState.STOPPED_OUT, gap_note)
 
     # 2. Full target (target_2) hit. No mirror-image fix needed here: filling at
     # the target when the bar opened above it understates the gain, which is the
@@ -469,6 +564,7 @@ def insert_alert(
                 f"extension={extension_pct:+.2f}%"
                 + (f",risk_x{risk_multiplier:.2f}" if risk_multiplier != 1.0 else "")
             ),
+            "retested": "yes" if alert_type == "PULLBACK_ENTRY" else "no",
         }
     )
 

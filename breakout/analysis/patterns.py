@@ -5,9 +5,20 @@ single `PatternMatch`. A non-detection returns a PatternMatch with
 `detected=False` and zero-valued fields — callers should check `detected`
 before consuming any other field.
 
-Phase 1 ships three detectors (52-week high breakout, Darvas Box, NR7).
-Phase 2 will add inside_bar, bollinger_squeeze, ascending_triangle, vcp,
-cup_and_handle, and flag.
+Nine detectors are fully implemented and enabled by default (see config.yaml):
+  1. fifty_two_week_high        — 52-week high breakout with resistance touches
+  2. darvas_box                 — Box breakout (parallel highs and lows)
+  3. nr7                        — Narrow range (NR7) compression breakout
+  4. inside_bar                 — Inside bar (range contraction) breakout
+  5. bollinger_squeeze          — Bollinger band squeeze (volatility contraction)
+  6. ascending_triangle         — Ascending triangle (bullish accumulation)
+  7. vcp                        — Volatility Contraction Pattern (Minervini)
+  8. cup_and_handle             — Cup & Handle formation
+  9. flag                       — Flag pattern (short-term consolidation)
+
+Each detector is configured independently in config.yaml's `patterns.enabled` list.
+Each returns a `PatternMatch` with confidence (0–100), breakout level, base height
+for measured-move targets, and metadata notes.
 """
 
 from __future__ import annotations
@@ -58,11 +69,33 @@ def _no_match(name: str) -> PatternMatch:
 # Lookback windows. 252 trading days ≈ 1 calendar year on Indian NSE.
 _FIFTY_TWO_WEEK_BARS = 252
 # Tolerance below the 52-week high for "close to" qualification.
+# ⚠️  TUNING REQUIRED: These thresholds are borrowed from Stan Weinstein's US
+# playbook and have NOT been backtested on Indian NSE data. Consider tuning:
+#  - _NEAR_52W_TOLERANCE_PCT: try 0.01, 0.02, 0.03 (wider = more signals)
+#  - _TOUCH_TOLERANCE_PCT: try 0.01, 0.015, 0.02 (wider = more touches)
+# Backtest against 2020-2024 data on NIFTY 500 and adjust based on win rate.
 _NEAR_52W_TOLERANCE_PCT = 0.02
 # Window used to count touches (proxies "how flat is the resistance").
 _TOUCH_COUNT_LOOKBACK = 126  # 6 months
 # A "touch" is a bar whose high comes within this fraction of the 52w high.
 _TOUCH_TOLERANCE_PCT = 0.015
+
+
+def _safe_pivot_lookback_bars(df: pd.DataFrame, n: int = 5) -> int:
+    """Safe lookback ensuring we don't use unconfirmed pivots.
+
+    Pivots require `n` bars on each side to confirm. The most recent `n` bars
+    cannot be confirmed yet. This helper ensures pattern detectors only use
+    pivots that are at least `n` bars away from today.
+
+    Args:
+        df: OHLCV DataFrame
+        n: Confirmation window for pivots (default 5)
+
+    Returns:
+        Safe lookback index (0-based): patterns should only use data up to this
+    """
+    return max(0, len(df) - 1 - n)
 
 
 def detect_fifty_two_week_high_breakout(df: pd.DataFrame) -> PatternMatch:

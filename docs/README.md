@@ -12,7 +12,7 @@ Every trading day it runs two batch jobs on your laptop:
 
 1. **Morning scan (9:30 AM IST)** — Scans all NIFTY 500 stocks, identifies setups that are *close to* breaking out, and updates two watchlists: stocks setting up for fresh breakouts, and stocks that recently broke out and could provide pullback entries.
 
-2. **Pre-close scan (3:00 PM IST)** — Re-checks the watchlists in the final 25 minutes of the trading session. Confirms which setups are actually closing as breakout candles (the "smart money hour" effect), and generates alerts with precise entry, stop-loss, and target levels.
+2. **Pre-close scan (3:20 PM IST)** — Re-checks the watchlists in the final 10 minutes of the trading session (gives you time to analyze the 3:00 PM market action). Confirms which setups are actually closing as breakout candles (the "smart money hour" effect), and generates alerts with precise entry, stop-loss, and target levels.
 
 Why end-of-day? Closing breakouts have a meaningfully higher success rate than intraday breakouts because institutional commitment shows up in the close, and the 3:00–3:25 PM window filters out the false breakouts that get sold off earlier in the day.
 
@@ -26,7 +26,18 @@ The system looks for stocks that satisfy **all** of these conditions:
 
 **Quality floor (hard pass/fail).** Market cap above ₹500 cr, average daily turnover above ₹5 cr, promoter pledge below 30%, listed for at least one year. Removes manipulated penny stocks before pattern detection runs.
 
-**Pattern detection (scored).** Looks for nine chart patterns ranging from 52-week high breakouts and Darvas Boxes to Volatility Contraction Patterns and Cup & Handle formations. Each pattern returns a confidence score.
+**Pattern detection (scored).** Detects all nine chart patterns:
+  - 52-week high breakouts (with resistance touch count for confidence)
+  - Darvas Boxes (parallel support and resistance)
+  - NR7 (narrow range compression breakouts)
+  - Inside Bars (range contraction into breakout)
+  - Bollinger Squeeze (volatility compression)
+  - Ascending Triangles (bullish accumulation)
+  - Volatility Contraction Patterns (VCP)
+  - Cup & Handle formations
+  - Flag patterns (short-term consolidation)
+
+Each pattern returns a confidence score. All patterns are enabled by default.
 
 **Confirmation signals (scored).** Volume on the breakout candle must be at least 1.5× the 20-day average. Pre-breakout tightness (contracting ATR) adds points. Relative strength versus NIFTY adds points. Sector index trending up adds points.
 
@@ -217,8 +228,8 @@ The CSV is sorted by score descending.
 The paper trading system runs from day one. Every alert is automatically logged as a virtual position:
 
 - **State machine:** `ALERTED → ENTERED → (TARGET_HIT | STOPPED_OUT | TIME_EXIT | CANCELED)`
-- **Entry:** Simulated at the next day's open price after the alert (realistic since you'd act EOD).
-- **Stop loss:** 1.5× ATR below breakout. If intraday low breaches it, position is closed at the stop price.
+- **Entry:** At 3:25 PM IST on the confirmation day (5 minutes after pre-close scan confirms), matching your real execution window of reviewing the alert and entering before market close at 3:30 PM.
+- **Stop loss:** 1.5× ATR below breakout level. If intraday low breaches it, position is closed at the stop price.
 - **Targets:** Two targets — 2:1 R:R and measured-move. System logs which one hit first.
 - **Time exit:** If neither stop nor target hits within 30 trading days, position closes at that day's close.
 - **Outcome tracking:** Every closed trade records win/loss, R-multiple, days held, max favorable excursion, max adverse excursion.
@@ -278,6 +289,20 @@ paper_trading:
 
 ---
 
+## FII/DII Flow Awareness & Market Stress Handling
+
+The system is aware of FII/DII activity via:
+
+- **India VIX monitoring** — Elevated VIX (>25) signals FII selling stress; position sizes scale down automatically
+- **Market breadth tracking** — % of NIFTY 500 above their 50-day MA shows participation. Narrow breadth (<40%) triggers position size reduction
+- **Sector momentum correlation** — Breakouts in risk-off regimes fail more often; sizing is automatically adjusted
+- **Portfolio circuit breaker** — Stops opening new positions if:
+  - Down >3% on the day (FII selling cascade)
+  - Down >10% month-to-date (monthly reset discipline)
+  - Concurrent position limit reached
+
+This prevents the system from compounding losses during FII selling panics or regime reversals.
+
 ## Limitations and known issues
 
 - **No intraday data dependency** — by design. The system makes decisions on daily OHLCV closes.
@@ -285,6 +310,7 @@ paper_trading:
 - **yfinance can rate-limit** — the `yfinance-cache` wrapper mitigates this; switch to Angel One if it becomes a problem.
 - **Backtest results are not predictive** — Indian market regime shifts (election cycles, RBI policy, FII flows) can dramatically change pattern reliability.
 - **The system does not execute trades** — it only produces alerts. Execution is manual via your broker app.
+- **FII/DII data is indirect** — VIX and breadth are proxies for flow direction; for real flow data, integrate FII Tracker API.
 
 ---
 

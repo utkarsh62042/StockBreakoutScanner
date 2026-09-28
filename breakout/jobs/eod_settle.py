@@ -22,6 +22,11 @@ from breakout.config import Config, ensure_runtime_dirs, load_config
 from breakout.data.fetcher import FetchError, RateLimitError, make_fetcher
 from breakout.data.store import Store
 from breakout.logging_setup import setup_logging
+from breakout.output.trades_summary import (
+    compute_active_trades,
+    compute_historic_stats,
+    send_trades_summary,
+)
 from breakout.paper.tracker import (
     OPEN_STATES,
     apply_outcome,
@@ -48,6 +53,8 @@ def main() -> int:
         run_id = store.start_run("eod_settle")
         try:
             n = _run(store, cfg)
+            # Send trades summary to Telegram if configured
+            _send_trades_summary(store, cfg)
             store.finish_run(run_id, "SUCCESS", alerts_generated=n)
             logger.info(f"eod_settle complete: {n} trades transitioned")
             return n
@@ -235,6 +242,29 @@ def _flag_failed_breakouts(store, fetcher, today: date, symbols_seen: set) -> in
         )
         count += 1
     return count
+
+
+def _send_trades_summary(store: Store, cfg: Config) -> None:
+    """Send active trades and stats summary to Telegram group."""
+    if not cfg.credentials.has_telegram_groups:
+        return
+
+    try:
+        all_trades = store.read_paper_trades_by_state() or []
+        active = compute_active_trades(all_trades)
+        stats = compute_historic_stats(all_trades)
+
+        if send_trades_summary(
+            cfg.credentials.telegram_bot_token,
+            cfg.credentials.telegram_trades_summary_group_id,
+            active,
+            stats,
+        ):
+            logger.info("trades summary sent to Telegram")
+        else:
+            logger.warning("trades summary send failed")
+    except Exception as e:
+        logger.exception(f"failed to send trades summary: {e}")
 
 
 if __name__ == "__main__":

@@ -33,6 +33,11 @@ class RiskConfig:
     # Breakouts cluster by sector, so without this eight positions can be one
     # bet. Defaulted for configs written before the cap existed.
     max_positions_per_sector: int = 3
+    # Portfolio circuit breakers: stop opening positions if triggered
+    max_portfolio_loss_pct_daily: float = 3.0
+    max_portfolio_loss_pct_monthly: float = 10.0
+    # Scale down position sizing when market is stressed (VIX up, breadth down)
+    scale_positions_in_market_stress: bool = True
 
 
 @dataclass(frozen=True)
@@ -159,17 +164,19 @@ class LoggingConfig:
 class Credentials:
     """Sensitive values pulled from .env. Empty strings if not set."""
 
-    angelone_api_key: str
-    angelone_client_code: str
-    angelone_pin: str
-    angelone_totp_secret: str
-    telegram_bot_token: str
-    telegram_chat_id: str
-    smtp_host: str
-    smtp_port: str
-    smtp_user: str
-    smtp_password: str
-    smtp_to: str
+    angelone_api_key: str = ""
+    angelone_client_code: str = ""
+    angelone_pin: str = ""
+    angelone_totp_secret: str = ""
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    telegram_breakout_alerts_group_id: str = ""
+    telegram_trades_summary_group_id: str = ""
+    smtp_host: str = ""
+    smtp_port: str = ""
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_to: str = ""
 
     @property
     def has_angelone(self) -> bool:
@@ -185,6 +192,14 @@ class Credentials:
     @property
     def has_telegram(self) -> bool:
         return bool(self.telegram_bot_token and self.telegram_chat_id)
+
+    @property
+    def has_telegram_groups(self) -> bool:
+        return bool(
+            self.telegram_bot_token
+            and self.telegram_breakout_alerts_group_id
+            and self.telegram_trades_summary_group_id
+        )
 
 
 @dataclass(frozen=True)
@@ -277,6 +292,8 @@ def load_config(config_path: Path | str | None = None) -> Config:
         angelone_totp_secret=os.getenv("ANGELONE_TOTP_SECRET", ""),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+        telegram_breakout_alerts_group_id=os.getenv("TELEGRAM_BREAKOUT_ALERTS_GROUP_ID", ""),
+        telegram_trades_summary_group_id=os.getenv("TELEGRAM_TRADES_SUMMARY_GROUP_ID", ""),
         smtp_host=os.getenv("SMTP_HOST", ""),
         smtp_port=os.getenv("SMTP_PORT", ""),
         smtp_user=os.getenv("SMTP_USER", ""),
