@@ -168,10 +168,12 @@ class Credentials:
     angelone_client_code: str = ""
     angelone_pin: str = ""
     angelone_totp_secret: str = ""
-    telegram_bot_token: str = ""
-    telegram_chat_id: str = ""
-    telegram_breakout_alerts_group_id: str = ""
-    telegram_trades_summary_group_id: str = ""
+    telegram_bot_token: str = ""  # deprecated: use telegram_breakout_alerts_bot_token and telegram_trades_summary_bot_token
+    telegram_chat_id: str = ""  # deprecated: use telegram_breakout_alerts_chat_id and telegram_trades_summary_chat_id
+    telegram_breakout_alerts_bot_token: str = ""
+    telegram_breakout_alerts_chat_id: str = ""
+    telegram_trades_summary_bot_token: str = ""
+    telegram_trades_summary_chat_id: str = ""
     smtp_host: str = ""
     smtp_port: str = ""
     smtp_user: str = ""
@@ -194,12 +196,22 @@ class Credentials:
         return bool(self.telegram_bot_token and self.telegram_chat_id)
 
     @property
-    def has_telegram_groups(self) -> bool:
+    def has_telegram_breakout_alerts(self) -> bool:
         return bool(
-            self.telegram_bot_token
-            and self.telegram_breakout_alerts_group_id
-            and self.telegram_trades_summary_group_id
+            self.telegram_breakout_alerts_bot_token
+            and self.telegram_breakout_alerts_chat_id
         )
+
+    @property
+    def has_telegram_trades_summary(self) -> bool:
+        return bool(
+            self.telegram_trades_summary_bot_token
+            and self.telegram_trades_summary_chat_id
+        )
+
+    @property
+    def has_telegram_notifications(self) -> bool:
+        return self.has_telegram_breakout_alerts or self.has_telegram_trades_summary
 
 
 @dataclass(frozen=True)
@@ -292,8 +304,10 @@ def load_config(config_path: Path | str | None = None) -> Config:
         angelone_totp_secret=os.getenv("ANGELONE_TOTP_SECRET", ""),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
-        telegram_breakout_alerts_group_id=os.getenv("TELEGRAM_BREAKOUT_ALERTS_GROUP_ID", ""),
-        telegram_trades_summary_group_id=os.getenv("TELEGRAM_TRADES_SUMMARY_GROUP_ID", ""),
+        telegram_breakout_alerts_bot_token=os.getenv("TELEGRAM_BREAKOUT_ALERTS_BOT_TOKEN", ""),
+        telegram_breakout_alerts_chat_id=os.getenv("TELEGRAM_BREAKOUT_ALERTS_CHAT_ID", ""),
+        telegram_trades_summary_bot_token=os.getenv("TELEGRAM_TRADES_SUMMARY_BOT_TOKEN", ""),
+        telegram_trades_summary_chat_id=os.getenv("TELEGRAM_TRADES_SUMMARY_CHAT_ID", ""),
         smtp_host=os.getenv("SMTP_HOST", ""),
         smtp_port=os.getenv("SMTP_PORT", ""),
         smtp_user=os.getenv("SMTP_USER", ""),

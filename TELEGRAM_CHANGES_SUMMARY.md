@@ -2,27 +2,27 @@
 
 ## What Was Built
 
-A complete **two-group Telegram notification system** for your breakout scanner:
+A complete **two-chat Telegram notification system** for your breakout scanner:
 
-1. **Breakout Alerts Group**: Receives fresh breakout signals when they are confirmed and entered
-2. **Trades Summary Group**: Receives daily summary of active trades with live details and historic performance stats
+1. **Breakout Alerts Chat**: Receives fresh breakout signals when they are confirmed and entered
+2. **Trades Summary Chat**: Receives daily summary of active trades with live details and historic performance stats
 
-Both groups receive dedicated messages so you can manage notifications independently.
+Both use your bot to send 1-on-1 messages directly to you.
 
 ---
 
 ## Files Modified
 
 ### 1. `breakout/config.py`
-- Added `telegram_breakout_alerts_group_id` field to `Credentials`
-- Added `telegram_trades_summary_group_id` field to `Credentials`
-- Added `has_telegram_groups` property to check if both groups are configured
-- Updated `load_config()` to load both group IDs from `.env`
+- Added `telegram_breakout_alerts_chat_id` field to `Credentials`
+- Added `telegram_trades_summary_chat_id` field to `Credentials`
+- Added `has_telegram_notifications` property to check if both chat IDs are configured
+- Updated `load_config()` to load both chat IDs from `.env`
 
 ### 2. `breakout/output/alerts.py`
-- Enhanced `TelegramChannel.__init__()` to accept `alerts_group_id` parameter
-- Updated `TelegramChannel.emit()` to send alerts to the dedicated group
-- Updated `build_channels()` to pass alerts group ID from config
+- Enhanced `TelegramChannel.__init__()` to accept `alerts_chat_id` parameter
+- Updated `TelegramChannel.emit()` to send alerts to the dedicated chat
+- Updated `build_channels()` to pass alerts chat ID from config
 
 ### 3. `breakout/output/trades_summary.py` (NEW)
 Complete new module with:
@@ -51,10 +51,12 @@ Complete new module with:
 
 ```bash
 TELEGRAM_BOT_TOKEN=<your_bot_token_from_botfather>
-TELEGRAM_CHAT_ID=<legacy_chat_id_or_alerts_group>
-TELEGRAM_BREAKOUT_ALERTS_GROUP_ID=<group_id_with_minus_sign>
-TELEGRAM_TRADES_SUMMARY_GROUP_ID=<group_id_with_minus_sign>
+TELEGRAM_CHAT_ID=<your_user_id>
+TELEGRAM_BREAKOUT_ALERTS_CHAT_ID=<your_user_id>
+TELEGRAM_TRADES_SUMMARY_CHAT_ID=<your_user_id>
 ```
+
+**Note**: Replace `<your_user_id>` with your Telegram User ID (positive integer). You can use the same ID for all three fields or different ones.
 
 ### Update Your `config.yaml`
 
@@ -83,7 +85,7 @@ Shares: 10  Vol: 2.5x
 
 - One message per alert
 - Includes all entry details
-- Sent to: `TELEGRAM_BREAKOUT_ALERTS_GROUP_ID`
+- Sent to: `TELEGRAM_BREAKOUT_ALERTS_CHAT_ID` (your User ID)
 
 ### Trades Summary Messages
 
@@ -114,16 +116,16 @@ Contains:
   - Win rate percentage
   - Average R-multiple
   - Net P&L in rupees
-- Sent to: `TELEGRAM_TRADES_SUMMARY_GROUP_ID`
+- Sent to: `TELEGRAM_TRADES_SUMMARY_CHAT_ID` (your User ID)
 
 ---
 
 ## Key Features
 
-### 1. Two Separate Groups
-- **Alerts Group**: Only breakout confirmations
-- **Summary Group**: Only daily summaries
-- Avoid notification fatigue by controlling each channel independently
+### 1. Simple Bot Setup
+- One Telegram bot sends both types of notifications
+- Messages go directly to you as private chats
+- No groups needed, completely private
 
 ### 2. Auto-Reset on Sheet Wipe
 - System detects when paper trades sheet is wiped
@@ -146,7 +148,7 @@ Contains:
 - Gracefully handles missing `requests` library
 - Failed sends are logged but don't stop jobs
 - 10-second timeout per message
-- Supports fallback if group IDs not configured
+- Supports fallback if chat IDs not configured
 
 ---
 
@@ -171,48 +173,44 @@ The system uses existing database without schema changes:
 
 ### Quick Start
 
-1. **Create Telegram bot** (if needed):
+1. **You have your bot already** ✓
    - Chat with @BotFather
-   - Get your bot token
+   - Get your bot token (already done)
 
-2. **Create two groups**:
-   - "My Breakout Alerts"
-   - "My Trades Summary"
-   - Add bot as admin to both
+2. **Get your Telegram User ID**:
+   - Visit: `https://api.telegram.org/bot[YOUR_TOKEN]/getUpdates`
+   - Or use @userinfobot
+   - Find the `"id"` value (positive number like `123456789`)
 
-3. **Get group IDs**:
-   - Visit: `https://api.telegram.org/botTOKEN/getUpdates`
-   - Send a message in each group
-   - Find the group ID (with minus sign)
-
-4. **Update `.env`**:
+3. **Update `.env`**:
    ```bash
-   TELEGRAM_BOT_TOKEN=<token>
-   TELEGRAM_BREAKOUT_ALERTS_GROUP_ID=<group_id>
-   TELEGRAM_TRADES_SUMMARY_GROUP_ID=<group_id>
+   TELEGRAM_BOT_TOKEN=<your_bot_token>
+   TELEGRAM_CHAT_ID=<your_user_id>
+   TELEGRAM_BREAKOUT_ALERTS_CHAT_ID=<your_user_id>
+   TELEGRAM_TRADES_SUMMARY_CHAT_ID=<your_user_id>
    ```
 
-5. **Enable in `config.yaml`**:
+4. **Enable in `config.yaml`**:
    ```yaml
    output.telegram: true
    ```
 
-6. **Test**:
-   - Run preclose scan → check Alerts group
-   - Run eod_settle → check Summary group
+5. **Test**:
+   - Run preclose scan → receive Breakout Alert message
+   - Run eod_settle → receive Trades Summary message
 
 ---
 
 ## Verification Checklist
 
 - [ ] Telegram bot created with @BotFather
-- [ ] Two groups created and bot added as admin
-- [ ] Group IDs obtained (with minus sign)
-- [ ] `.env` file updated with token and group IDs
+- [ ] Bot token saved in `.env` as `TELEGRAM_BOT_TOKEN`
+- [ ] User ID obtained (positive number)
+- [ ] `.env` file updated with bot token and User IDs
 - [ ] `config.yaml` has `output.telegram: true`
 - [ ] `requests` library installed (`pip install requests`)
-- [ ] First preclose_scan sends alert to Alerts group
-- [ ] First eod_settle sends summary to Summary group
+- [ ] First preclose_scan sends alert message
+- [ ] First eod_settle sends summary message
 - [ ] Stats reset after wiping paper trades sheet
 
 ---
@@ -222,8 +220,8 @@ The system uses existing database without schema changes:
 | Problem | Solution |
 |---------|----------|
 | "Telegram disabled: requests unavailable" | Run `pip install requests` |
-| No messages appear | Check bot is admin in groups; verify group IDs include minus sign |
-| Wrong group gets message | Verify group IDs in `.env` are correctly assigned |
+| No messages appear | Check User ID is correct (positive number); verify bot token is correct |
+| Messages from wrong bot | Verify `TELEGRAM_BOT_TOKEN` is correct in `.env` |
 | Stats not resetting | Ensure you delete all rows (not just clear) when wiping sheet |
 
 ---
@@ -232,10 +230,10 @@ The system uses existing database without schema changes:
 
 1. **Setup Instructions**: See `TELEGRAM_SETUP.md`
 2. **Implementation Details**: See `TELEGRAM_IMPLEMENTATION.md`
-3. **Config changes**: See `breakout/config.py` (lines ~163-195)
+3. **Config changes**: See `breakout/config.py` (Credentials class)
 4. **New trades summary module**: See `breakout/output/trades_summary.py`
-5. **Alert dispatcher updates**: See `breakout/output/alerts.py` (lines ~123-161)
-6. **EOD settle integration**: See `breakout/jobs/eod_settle.py`
+5. **Alert dispatcher updates**: See `breakout/output/alerts.py` (TelegramChannel class)
+6. **EOD settle integration**: See `breakout/jobs/eod_settle.py` (_send_trades_summary function)
 
 ---
 

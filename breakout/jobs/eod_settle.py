@@ -245,8 +245,8 @@ def _flag_failed_breakouts(store, fetcher, today: date, symbols_seen: set) -> in
 
 
 def _send_trades_summary(store: Store, cfg: Config) -> None:
-    """Send active trades and stats summary to Telegram group."""
-    if not cfg.credentials.has_telegram_groups:
+    """Send active trades and stats summary to Telegram chat using dedicated bot."""
+    if not cfg.credentials.has_telegram_trades_summary:
         return
 
     try:
@@ -255,8 +255,8 @@ def _send_trades_summary(store: Store, cfg: Config) -> None:
         stats = compute_historic_stats(all_trades)
 
         if send_trades_summary(
-            cfg.credentials.telegram_bot_token,
-            cfg.credentials.telegram_trades_summary_group_id,
+            cfg.credentials.telegram_trades_summary_bot_token,
+            cfg.credentials.telegram_trades_summary_chat_id,
             active,
             stats,
         ):

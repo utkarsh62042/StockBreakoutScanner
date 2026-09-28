@@ -1,111 +1,98 @@
 # Telegram Notification Setup
 
-This guide explains how to set up the two Telegram notification groups for the breakout scanner.
+This guide explains how to set up Telegram notifications for the breakout scanner using two separate bots.
 
 ## Overview
 
-The system sends notifications to **two separate Telegram groups**:
+The system sends notifications using **two separate bots**:
 
-1. **Breakout Alerts Group**: Fresh breakout signals when they are entered
-2. **Trades Summary Group**: Daily summary of active trades and historic stats
+1. **Breakout Alerts Bot**: Sends fresh breakout signals when they are confirmed and entered
+2. **Trades Summary Bot**: Sends daily summary of active trades and historic stats
 
-Both notifications are sent to dedicated groups so you can mute one without missing the other.
+Each bot sends to your personal Telegram chat (one-sided messages), keeping notifications organized by purpose.
 
 ---
 
 ## Prerequisites
 
-1. A Telegram bot created with BotFather
-2. Two Telegram groups (or channels) created
-3. The bot added as an admin to both groups
-4. Your `.env` file configured with bot credentials
+1. A Telegram account
+2. Two Telegram bots created with @BotFather:
+   - One for breakout alerts
+   - One for trades summary
+3. You've sent `/start` to both bots
 
 ---
 
-## Step 1: Create/Get Your Telegram Bot
+## Step 1: Create Your Two Telegram Bots
 
-If you don't have a bot yet:
+Create two separate bots via @BotFather:
 
-1. Open Telegram and search for `@BotFather`
-2. Send `/newbot` and follow the prompts to create a bot
-3. Copy the **Bot Token** (format: `123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11`)
+1. **Bot 1** (for breakout alerts): Name it something like "BreakoutBot" and save the token
+2. **Bot 2** (for trades summary): Name it something like "TradesSummaryBot" and save the token
 
----
-
-## Step 2: Create Two Telegram Groups
-
-### Group 1: Breakout Alerts
-Create a group named something like:
-- `My Breakout Alerts`
-- `Trading Signals`
-- `Entry Alerts`
-
-Add your bot as an admin to this group.
-
-### Group 2: Trades Summary
-Create a group named something like:
-- `My Trades Summary`
-- `Active Positions`
-- `Trading Dashboard`
-
-Add your bot as an admin to this group.
+You'll need both tokens in your `.env` file.
 
 ---
 
-## Step 3: Get the Group IDs
+## Step 2: Get Your Telegram User ID
 
-There are two ways to get the group IDs:
+This is the chat ID for 1-on-1 messages with the bot.
 
 ### Method A: Using the Bot (Recommended)
 
-1. Send a message to your bot: `/start` or any text
-2. Add your bot to the groups and send a test message in each group
-3. Visit this URL in your browser (replace `BOT_TOKEN` with your actual token):
+1. Send `/start` or any message to your bot
+2. Visit this URL in your browser (replace `BOT_TOKEN` with your actual token):
    ```
    https://api.telegram.org/botBOT_TOKEN/getUpdates
    ```
-4. Look for the JSON response. Find entries like:
+3. Look for the JSON response. Find entries like:
    ```json
    {
      "message": {
-       "chat": {
-         "id": -1001234567890,
+       "from": {
+         "id": 123456789,
+         "first_name": "Your Name",
          ...
-       }
+       },
+       ...
      }
    }
    ```
-5. The `"id"` value (with the minus sign) is your group ID
+4. The `"id"` value under `"from"` is your **User ID** (a positive number, not negative)
 
-### Method B: Using @RawDataBot
+### Method B: Using @userinfobot
 
-1. Add [@RawDataBot](https://t.me/RawDataBot) to each group
-2. Send a message in the group
-3. @RawDataBot will show you the group ID
-4. Remove @RawDataBot from the groups
+1. Open Telegram and search for `@userinfobot`
+2. Send it any message
+3. It will reply with your User ID
 
 ---
 
-## Step 4: Configure Your `.env` File
+## Step 3: Configure Your `.env` File
 
 Add/update these lines in your `.env` file:
 
 ```bash
-TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-TELEGRAM_CHAT_ID=-1001234567890
-TELEGRAM_BREAKOUT_ALERTS_GROUP_ID=-1001111111111
-TELEGRAM_TRADES_SUMMARY_GROUP_ID=-1002222222222
+# Bot 1 - Breakout Alerts
+TELEGRAM_BREAKOUT_ALERTS_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+TELEGRAM_BREAKOUT_ALERTS_CHAT_ID=123456789
+
+# Bot 2 - Trades Summary
+TELEGRAM_TRADES_SUMMARY_BOT_TOKEN=654321:XYZ-GHI5678jklmn-opqr90Z3w4v567ax22
+TELEGRAM_TRADES_SUMMARY_CHAT_ID=123456789
 ```
 
 Where:
-- `TELEGRAM_BOT_TOKEN`: Your bot token from BotFather
-- `TELEGRAM_CHAT_ID`: Legacy (can be same as TELEGRAM_BREAKOUT_ALERTS_GROUP_ID)
-- `TELEGRAM_BREAKOUT_ALERTS_GROUP_ID`: Your breakout alerts group ID
-- `TELEGRAM_TRADES_SUMMARY_GROUP_ID`: Your trades summary group ID
+- `TELEGRAM_BREAKOUT_ALERTS_BOT_TOKEN`: Bot 1 token from @BotFather
+- `TELEGRAM_BREAKOUT_ALERTS_CHAT_ID`: Your User ID (where Bot 1 sends alerts)
+- `TELEGRAM_TRADES_SUMMARY_BOT_TOKEN`: Bot 2 token from @BotFather
+- `TELEGRAM_TRADES_SUMMARY_CHAT_ID`: Your User ID (where Bot 2 sends summary)
+
+**Note**: Both chat IDs are typically the same (your User ID), but you can use different IDs if you want messages from each bot to go to different destinations.
 
 ---
 
-## Step 5: Enable Telegram in Config
+## Step 4: Enable Telegram in Config
 
 Update your `config.yaml`:
 
@@ -120,9 +107,9 @@ output:
 
 ## How It Works
 
-### Breakout Alerts Group
+### Breakout Alerts (Bot 1)
 
-When a breakout is confirmed at 3:20 PM IST, the system sends a message like:
+When a breakout is confirmed at 3:20 PM IST, Bot 1 sends you a message like:
 
 ```
 🚨 BREAKOUT — INFY
@@ -132,11 +119,11 @@ T1: ₹1530.00  T2: ₹1560.00
 Shares: 10  Vol: 2.5x
 ```
 
-One message per alert, so they're easy to scan on your phone.
+One message per alert from the breakout bot.
 
-### Trades Summary Group
+### Trades Summary (Bot 2)
 
-After end-of-day settlement (4:00 PM IST), the system sends a summary:
+After end-of-day settlement (4:00 PM IST), Bot 2 sends you a summary message:
 
 ```
 📊 Trades Summary — 2026-09-28
@@ -156,7 +143,7 @@ After end-of-day settlement (4:00 PM IST), the system sends a summary:
   Net P&L: ₹45,320
 ```
 
-**The stats automatically reset** when you wipe the paper trading sheet (the system detects the change and resets the tracking date).
+**The stats automatically reset** when you wipe the paper trading sheet (the system detects the change).
 
 ---
 
@@ -164,10 +151,10 @@ After end-of-day settlement (4:00 PM IST), the system sends a summary:
 
 To test your setup:
 
-1. Run the preclose scan (or create a test alert)
-2. Check if the breakout alert appears in the Breakout Alerts group
+1. Run the preclose scan (or wait for next confirmed breakout)
+2. Check if you receive the breakout alert message
 3. Run the eod_settle job (or wait for 4:00 PM)
-4. Check if the trades summary appears in the Trades Summary group
+4. Check if you receive the trades summary message
 
 ---
 
@@ -179,35 +166,46 @@ Install the requests library:
 pip install requests
 ```
 
-### Group ID showing in the console but messages not sent
-- Verify the bot is an admin in both groups
-- Check that the group IDs in `.env` are correct (include the minus sign)
+### I'm not receiving messages
+
+**Check 1: User ID is correct**
+- Visit `https://api.telegram.org/botTOKEN/getUpdates` with your bot token
+- Send a test message to the bot
+- Look for your User ID in the response (under `"from"` → `"id"`)
+
+**Check 2: Bot can see you**
+- Make sure you've sent `/start` to the bot first
+- Try sending it another message
+
+**Check 3: Config is correct**
+- For breakout alerts: Verify `TELEGRAM_BREAKOUT_ALERTS_BOT_TOKEN` and `TELEGRAM_BREAKOUT_ALERTS_CHAT_ID` in `.env`
+- For trades summary: Verify `TELEGRAM_TRADES_SUMMARY_BOT_TOKEN` and `TELEGRAM_TRADES_SUMMARY_CHAT_ID` in `.env`
 - Verify `output.telegram: true` in `config.yaml`
+- Chat IDs should be positive numbers (like `123456789`), not negative
 
-### Stats not resetting when you wipe the sheet
-The system detects wipes by hashing the trade IDs. Make sure:
-- You're using the native Excel "delete all rows" not just clearing values
-- The wipe happens **before** the next eod_settle run
+**Check 4: `.env` is loaded**
+- Make sure `.env` is in the project root directory
+- Restart your application after changing `.env`
 
-### Wrong group receiving the message
-Double-check that:
-- `TELEGRAM_BREAKOUT_ALERTS_GROUP_ID` points to the Alerts group
-- `TELEGRAM_TRADES_SUMMARY_GROUP_ID` points to the Summary group
+### Wrong bot receiving messages
+
+Make sure:
+- `TELEGRAM_BREAKOUT_ALERTS_BOT_TOKEN` is the correct token for the breakout bot
+- `TELEGRAM_TRADES_SUMMARY_BOT_TOKEN` is the correct token for the summary bot
+- Chat IDs match your User ID from Telegram
 
 ---
 
 ## Example `.env` File
 
 ```bash
-# Telegram Bot Token (get from @BotFather)
-TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+# Bot 1 - Breakout Alerts (get token from @BotFather)
+TELEGRAM_BREAKOUT_ALERTS_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+TELEGRAM_BREAKOUT_ALERTS_CHAT_ID=123456789
 
-# Legacy chat ID (can be same as alerts group)
-TELEGRAM_CHAT_ID=-1001234567890
-
-# Two dedicated groups
-TELEGRAM_BREAKOUT_ALERTS_GROUP_ID=-1001234567890
-TELEGRAM_TRADES_SUMMARY_GROUP_ID=-1009876543210
+# Bot 2 - Trades Summary (get token from @BotFather)
+TELEGRAM_TRADES_SUMMARY_BOT_TOKEN=654321:XYZ-GHI5678jklmn-opqr90Z3w4v567ax22
+TELEGRAM_TRADES_SUMMARY_CHAT_ID=123456789
 
 # Other credentials...
 ANGELONE_API_KEY=your_key
@@ -215,21 +213,38 @@ ANGELONE_API_KEY=your_key
 
 ---
 
-## Notes
+## Advanced: Customization
 
-- **Privacy**: The trade summaries contain position details. Only add people you trust to these groups.
-- **Frequency**: Alerts go out as they're confirmed. Summary goes out once daily after settle.
-- **No sensitive data**: The bot token is the only credential the bot needs; it's already in your `.env` and not committed.
-- **Fallback**: If a message fails to send, it's logged but doesn't stop the scan or settle job.
+The system now supports two separate bots by design. If you need different behavior:
+
+**Same User ID for both bots**: Both bots send to your personal chat (recommended)
+- Easier to manage, messages from both bots appear in the same conversation
+- Just set both `*_CHAT_ID` values to your User ID
+
+**Different destinations**: Each bot sends to a different chat
+- Bot 1 sends to one User ID
+- Bot 2 sends to a different User ID (or group)
+- Useful if you want to separate notifications by severity or purpose
 
 ---
 
-## Group IDs Reference
+## Notes
 
-Save your group IDs somewhere safe:
+- **Privacy**: Messages are sent only to your personal Telegram chat, not to groups
+- **Frequency**: Alerts go out immediately when confirmed. Summary goes out once daily after settle
+- **Fallback**: If a message fails to send, it's logged but doesn't stop the scan or settle job
+- **Offline**: If you're offline, Telegram stores the message and delivers it when you're back online
 
-| Group | ID |
-|-------|-----|
-| Breakout Alerts | `TELEGRAM_BREAKOUT_ALERTS_GROUP_ID=` |
-| Trades Summary | `TELEGRAM_TRADES_SUMMARY_GROUP_ID=` |
+---
+
+## Chat IDs Reference
+
+Save your settings:
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| Breakout Bot Token | `TELEGRAM_BREAKOUT_ALERTS_BOT_TOKEN=` | Sends breakout alerts |
+| Breakout Chat ID | `TELEGRAM_BREAKOUT_ALERTS_CHAT_ID=` | Your User ID |
+| Summary Bot Token | `TELEGRAM_TRADES_SUMMARY_BOT_TOKEN=` | Sends daily trades summary |
+| Summary Chat ID | `TELEGRAM_TRADES_SUMMARY_CHAT_ID=` | Your User ID |
 

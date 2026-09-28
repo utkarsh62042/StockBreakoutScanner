@@ -8,9 +8,9 @@ This document describes the implementation of the two-group Telegram notificatio
 
 1. **Config Updates** (`breakout/config.py`)
    - Added two new credential fields:
-     - `telegram_breakout_alerts_group_id`: Group for fresh breakout alerts
-     - `telegram_trades_summary_group_id`: Group for daily trades summary
-   - New property `has_telegram_groups` to check if both groups are configured
+     - `telegram_breakout_alerts_chat_id`: Chat ID for fresh breakout alerts
+     - `telegram_trades_summary_chat_id`: Chat ID for daily trades summary
+   - New property `has_telegram_notifications` to check if both chat IDs are configured
 
 2. **Trades Summary Module** (`breakout/output/trades_summary.py`)
    - `TradeDetail`: Dataclass for active trade information
@@ -18,15 +18,15 @@ This document describes the implementation of the two-group Telegram notificatio
    - `compute_active_trades()`: Extracts currently open trades
    - `compute_historic_stats()`: Calculates win rate, avg R, P&L
    - `format_telegram_trades_summary()`: Formats message for Telegram
-   - `send_trades_summary()`: Sends message to Telegram group
+   - `send_trades_summary()`: Sends message to Telegram chat
 
 3. **Alert Dispatcher Updates** (`breakout/output/alerts.py`)
-   - Enhanced `TelegramChannel` to accept `alerts_group_id` parameter
-   - Routes alerts to dedicated group instead of single chat
+   - Enhanced `TelegramChannel` to accept `alerts_chat_id` parameter
+   - Routes alerts to dedicated chat instead of default chat
 
 4. **EOD Settle Job Integration** (`breakout/jobs/eod_settle.py`)
    - Calls `_send_trades_summary()` after settlement completes
-   - Sends active trades + historic stats to Trades Summary group
+   - Sends active trades + historic stats to Trades Summary chat
 
 ## Data Flow
 
@@ -39,7 +39,7 @@ preclose_scan → detect confirmation → create Alert
                                       ↓
                               TelegramChannel.emit()
                                       ↓
-                         TELEGRAM_BREAKOUT_ALERTS_GROUP_ID
+                         TELEGRAM_BREAKOUT_ALERTS_CHAT_ID
 ```
 
 ### Trades Summary
@@ -54,7 +54,7 @@ eod_settle → settle all trades → _send_trades_summary()
                                      ↓
                            send_trades_summary()
                                      ↓
-                      TELEGRAM_TRADES_SUMMARY_GROUP_ID
+                      TELEGRAM_TRADES_SUMMARY_CHAT_ID
 ```
 
 ## Configuration
@@ -63,10 +63,12 @@ eod_settle → settle all trades → _send_trades_summary()
 
 ```bash
 TELEGRAM_BOT_TOKEN=<bot_token>
-TELEGRAM_CHAT_ID=<legacy_chat_id>
-TELEGRAM_BREAKOUT_ALERTS_GROUP_ID=<group_id>
-TELEGRAM_TRADES_SUMMARY_GROUP_ID=<group_id>
+TELEGRAM_CHAT_ID=<user_id>
+TELEGRAM_BREAKOUT_ALERTS_CHAT_ID=<user_id>
+TELEGRAM_TRADES_SUMMARY_CHAT_ID=<user_id>
 ```
+
+Note: All chat IDs should be positive integers (your Telegram User ID). You can use the same User ID for both notifications or different ones.
 
 ### Config File (`config.yaml`)
 
