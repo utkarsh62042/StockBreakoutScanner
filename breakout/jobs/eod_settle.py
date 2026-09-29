@@ -16,6 +16,7 @@ Run with:  python -m breakout.jobs.eod_settle
 from __future__ import annotations
 
 import logging
+from datetime import date
 
 from breakout.analysis.session import today_ist
 from breakout.config import Config, ensure_runtime_dirs, load_config
