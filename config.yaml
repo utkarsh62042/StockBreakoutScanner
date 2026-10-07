@@ -60,7 +60,7 @@ stage_filter:
 
 output:
   csv: true
-  telegram: false
+  telegram: true
   email: false
 
 paper_trading:

@@ -1,11 +1,11 @@
 # Secrets and user config
-.env
-config.yaml
+!.env
+!config.yaml
 
 # Runtime artifacts
-data_cache/
-logs/
-output/
+!data_cache/
+!logs/
+!output/
 *.db
 *.sqlite
 *.sqlite3
