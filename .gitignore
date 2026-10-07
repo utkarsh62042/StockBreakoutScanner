@@ -34,3 +34,7 @@ coverage.xml
 *.swp
 .DS_Store
 Thumbs.db
+
+# Tracked scanner state lives in data/breakout.xlsx
+data/*
+!data/breakout.xlsx
