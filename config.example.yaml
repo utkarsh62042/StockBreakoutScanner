@@ -99,7 +99,7 @@ paths:
   data_cache: "data_cache"
   logs: "logs"
   output: "output"
-  workbook: "data_cache/breakout.xlsx"   # single Excel workbook, one sheet per table
+  workbook: "data/breakout.xlsx"   # single Excel workbook, one sheet per table
 
 logging:
   level: "INFO"
