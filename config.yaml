@@ -96,10 +96,10 @@ costs:
   slippage_pct: 0.05
 
 paths:
-  data_cache: "data_cache"
+  data_cache: "data"
   logs: "logs"
   output: "output"
-  workbook: "data_cache/breakout.xlsx"   # single Excel workbook, one sheet per table
+  workbook: "data/breakout.xlsx"   # single Excel workbook, one sheet per table
 
 logging:
   level: "INFO"
