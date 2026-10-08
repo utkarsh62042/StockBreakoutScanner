@@ -1,11 +1,13 @@
-# Secrets and user config
-!.env
-!config.yaml
+# Secrets
+.env
 
 # Runtime artifacts
-!data_cache/
-!logs/
-!output/
+logs/
+output/
+
+# Keep scanner state workbook tracked
+!data/
+!data/breakout.xlsx
 *.db
 *.sqlite
 *.sqlite3
