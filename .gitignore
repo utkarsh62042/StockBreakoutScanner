@@ -1,10 +1,11 @@
 # Secrets and user config
-.env
-config.yaml
+!.env
+!config.yaml
 
 # Runtime artifacts
-/logs/
-/output/
+!data_cache/
+!logs/
+!output/
 *.db
 *.sqlite
 *.sqlite3
@@ -34,3 +35,7 @@ coverage.xml
 *.swp
 .DS_Store
 Thumbs.db
+
+# Tracked scanner state lives in data/breakout.xlsx
+data/*
+!data/breakout.xlsx
