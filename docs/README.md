@@ -63,10 +63,9 @@ Before running, you'll need to provide a few things. The build script will ask y
 
 If you already have an Angel One or Upstox demat, use that — it's more reliable than yfinance, which occasionally rate-limits aggressive users. If you don't have either, yfinance with proper caching works well for our two-runs-per-day usage pattern.
 
-**3. Output preference.** Three options:
+**3. Output preference.** Two options:
 
 - **CSV only** — Results written to `output/alerts_YYYY-MM-DD.csv`. Simplest.
-- **CSV + Telegram bot** — Real-time alerts pushed to your phone. Needs a Telegram bot token (free, takes 5 minutes to set up).
 - **CSV + Email** — Daily digest emailed to you. Needs an SMTP-enabled email (Gmail app password works).
 
 **4. Risk parameters.** Capital you're willing to risk per trade. The system uses this to calculate position size based on the ATR-derived stop-loss distance, ensuring you never risk more than your specified percentage on a single trade. Default is 1% risk per trade, but you can configure it.
@@ -107,7 +106,7 @@ If your laptop is asleep at those times, the system will run on the next wake-up
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
 │ OUTPUT LAYER                                                │
-│ Ranked alerts (CSV / Telegram / email)                      │
+│ Ranked alerts (CSV / email)                                 │
 │ Paper trading log + outcome tracking                        │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -276,11 +275,7 @@ thresholds:
 
 output:
   csv: true
-  telegram: false
-  telegram_bot_token: ""
-  telegram_chat_id: ""
   email: false
-  email_smtp: ""
 
 paper_trading:
   enabled: true

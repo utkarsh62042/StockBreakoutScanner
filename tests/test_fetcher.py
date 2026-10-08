@@ -275,10 +275,15 @@ def test_fetch_earnings_dates_parses(monkeypatch) -> None:
 
 def test_fetch_earnings_dates_graceful_on_error(monkeypatch) -> None:
     import yfinance
+    from pathlib import Path
 
     class _Boom:
         def __init__(self, *a, **k):
             raise RuntimeError("yf down")
 
     monkeypatch.setattr(yfinance, "Ticker", _Boom)
+    # Mock Path.exists() to return False so CSV fallback also fails
+    def mock_exists(self):
+        return False
+    monkeypatch.setattr(Path, "exists", mock_exists)
     assert fmod.fetch_earnings_dates("RELIANCE") == []

@@ -214,6 +214,7 @@ class Credentials:
         return self.has_telegram_breakout_alerts or self.has_telegram_trades_summary
 
 
+
 @dataclass(frozen=True)
 class Config:
     universe: str

@@ -14,31 +14,26 @@ Both use your bot to send 1-on-1 messages directly to you.
 ## Files Modified
 
 ### 1. `breakout/config.py`
+- Added `telegram_breakout_alerts_bot_token` field to `Credentials`
 - Added `telegram_breakout_alerts_chat_id` field to `Credentials`
+- Added `telegram_trades_summary_bot_token` field to `Credentials`
 - Added `telegram_trades_summary_chat_id` field to `Credentials`
-- Added `has_telegram_notifications` property to check if both chat IDs are configured
-- Updated `load_config()` to load both chat IDs from `.env`
+- Added `has_telegram_breakout_alerts` property to check if breakout alerts are configured
+- Added `has_telegram_trades_summary` property to check if trades summary is configured
+- Added `has_telegram_notifications` property to check if either is configured
+- Updated `load_config()` to load all four fields from `.env`
 
-### 2. `breakout/output/alerts.py`
-- Enhanced `TelegramChannel.__init__()` to accept `alerts_chat_id` parameter
-- Updated `TelegramChannel.emit()` to send alerts to the dedicated chat
-- Updated `build_channels()` to pass alerts chat ID from config
-
-### 3. `breakout/output/trades_summary.py` (NEW)
+### 2. `breakout/output/trades_summary.py` (NEW)
 Complete new module with:
-- `TradeDetail`: Dataclass for individual trade information
-- `HistoricStats`: Dataclass for performance statistics
 - `compute_active_trades()`: Extracts open trades (ENTERED, TARGET_1_HIT states)
-- `compute_historic_stats()`: Calculates:
+- `compute_historic_stats()`: Calculates performance statistics including:
   - Total/achieved/ongoing/failed trade counts
   - Win rate (percentage)
   - Average R-multiple
   - Total P&L
-  - Trade hash (for detecting sheet wipes)
-- `format_telegram_trades_summary()`: Formats professional message for Telegram
-- `send_trades_summary()`: Sends message to Telegram group with error handling
+- `send_trades_summary()`: Sends message to Telegram chat with error handling
 
-### 4. `breakout/jobs/eod_settle.py`
+### 3. `breakout/jobs/eod_settle.py`
 - Added imports for trades summary functions
 - Added `_send_trades_summary()` function to compute and send trades summary
 - Integrated trades summary sending into main job after settlement completes
@@ -50,13 +45,13 @@ Complete new module with:
 ### Add to Your `.env` File
 
 ```bash
-TELEGRAM_BOT_TOKEN=<your_bot_token_from_botfather>
-TELEGRAM_CHAT_ID=<your_user_id>
+TELEGRAM_BREAKOUT_ALERTS_BOT_TOKEN=<your_bot_token_from_botfather>
 TELEGRAM_BREAKOUT_ALERTS_CHAT_ID=<your_user_id>
+TELEGRAM_TRADES_SUMMARY_BOT_TOKEN=<your_bot_token_from_botfather>
 TELEGRAM_TRADES_SUMMARY_CHAT_ID=<your_user_id>
 ```
 
-**Note**: Replace `<your_user_id>` with your Telegram User ID (positive integer). You can use the same ID for all three fields or different ones.
+**Note**: Replace `<your_user_id>` with your Telegram User ID (positive integer). You can use the same ID for all fields or different ones.
 
 ### Update Your `config.yaml`
 
@@ -123,32 +118,27 @@ Contains:
 ## Key Features
 
 ### 1. Simple Bot Setup
-- One Telegram bot sends both types of notifications
+- Two separate Telegram bots send both types of notifications
 - Messages go directly to you as private chats
 - No groups needed, completely private
 
-### 2. Auto-Reset on Sheet Wipe
-- System detects when paper trades sheet is wiped
-- Automatically resets stats tracking for next period
-- Detection based on trade ID hash changes
-
-### 3. Comprehensive Trade Details
+### 2. Comprehensive Trade Details
 - Shows active trades sorted by symbol
 - Includes all price levels (entry, stop, targets)
 - Position size and pattern name
 - Current % movement from entry point (future enhancement)
 
-### 4. Historic Performance Metrics
+### 3. Historic Performance Metrics
 - Win rate: % of closed trades with profit
 - Avg R-multiple: Average return per unit of risk
 - Total P&L: Net profit/loss after transaction costs
 - Trade classification: Achieved, Ongoing, Failed
 
-### 5. Robust Error Handling
+### 4. Robust Error Handling
 - Gracefully handles missing `requests` library
 - Failed sends are logged but don't stop jobs
 - 10-second timeout per message
-- Supports fallback if chat IDs not configured
+- Supports fallback if credentials not configured
 
 ---
 
@@ -173,9 +163,9 @@ The system uses existing database without schema changes:
 
 ### Quick Start
 
-1. **You have your bot already** ✓
-   - Chat with @BotFather
-   - Get your bot token (already done)
+1. **Create your bots with @BotFather** ✓
+   - Create two bots
+   - Get their tokens
 
 2. **Get your Telegram User ID**:
    - Visit: `https://api.telegram.org/bot[YOUR_TOKEN]/getUpdates`
@@ -184,9 +174,9 @@ The system uses existing database without schema changes:
 
 3. **Update `.env`**:
    ```bash
-   TELEGRAM_BOT_TOKEN=<your_bot_token>
-   TELEGRAM_CHAT_ID=<your_user_id>
+   TELEGRAM_BREAKOUT_ALERTS_BOT_TOKEN=<your_bot_token>
    TELEGRAM_BREAKOUT_ALERTS_CHAT_ID=<your_user_id>
+   TELEGRAM_TRADES_SUMMARY_BOT_TOKEN=<your_bot_token>
    TELEGRAM_TRADES_SUMMARY_CHAT_ID=<your_user_id>
    ```
 
@@ -203,15 +193,14 @@ The system uses existing database without schema changes:
 
 ## Verification Checklist
 
-- [ ] Telegram bot created with @BotFather
-- [ ] Bot token saved in `.env` as `TELEGRAM_BOT_TOKEN`
+- [ ] Telegram bots created with @BotFather
+- [ ] Both bot tokens saved in `.env`
 - [ ] User ID obtained (positive number)
-- [ ] `.env` file updated with bot token and User IDs
+- [ ] `.env` file updated with bot tokens and User IDs
 - [ ] `config.yaml` has `output.telegram: true`
 - [ ] `requests` library installed (`pip install requests`)
 - [ ] First preclose_scan sends alert message
 - [ ] First eod_settle sends summary message
-- [ ] Stats reset after wiping paper trades sheet
 
 ---
 
@@ -220,9 +209,8 @@ The system uses existing database without schema changes:
 | Problem | Solution |
 |---------|----------|
 | "Telegram disabled: requests unavailable" | Run `pip install requests` |
-| No messages appear | Check User ID is correct (positive number); verify bot token is correct |
-| Messages from wrong bot | Verify `TELEGRAM_BOT_TOKEN` is correct in `.env` |
-| Stats not resetting | Ensure you delete all rows (not just clear) when wiping sheet |
+| No messages appear | Check User ID is correct (positive number); verify bot tokens are correct |
+| Messages from wrong bot | Verify bot tokens in `.env` are correct |
 
 ---
 
@@ -232,8 +220,7 @@ The system uses existing database without schema changes:
 2. **Implementation Details**: See `TELEGRAM_IMPLEMENTATION.md`
 3. **Config changes**: See `breakout/config.py` (Credentials class)
 4. **New trades summary module**: See `breakout/output/trades_summary.py`
-5. **Alert dispatcher updates**: See `breakout/output/alerts.py` (TelegramChannel class)
-6. **EOD settle integration**: See `breakout/jobs/eod_settle.py` (_send_trades_summary function)
+5. **EOD settle integration**: See `breakout/jobs/eod_settle.py` (_send_trades_summary function)
 
 ---
 
@@ -244,12 +231,12 @@ All components have been tested:
 - Active trades computation ✓
 - Historic stats calculation ✓
 - Message formatting ✓
-- Alert object creation ✓
+- Telegram send via API ✓
 - Module imports ✓
 
 You can run the integration test:
 ```bash
-python breakout/jobs/eod_settle.py  # Will trigger trades summary send
+python -m breakout.jobs.eod_settle  # Will trigger trades summary send
 ```
 
 ---
@@ -258,18 +245,17 @@ python breakout/jobs/eod_settle.py  # Will trigger trades summary send
 
 Once configured:
 
-1. **First Run**: preclose_scan will send alerts to the Alerts group
-2. **Daily Updates**: eod_settle will send summaries to the Summary group
-3. **Monitor**: Check both groups for messages and adjust if needed
+1. **First Run**: preclose_scan will send alerts to the Alerts chat
+2. **Daily Updates**: eod_settle will send summaries to the Summary chat
+3. **Monitor**: Check both chats for messages and adjust if needed
 4. **Feedback**: Let me know if you want to modify message format or frequency
 
 ---
 
 ## Notes
 
-- **Privacy**: Keep group links private; they contain position details
+- **Privacy**: Keep chat IDs private; they contain position details
 - **Frequency**: Alerts immediate on confirmation; summary once daily
 - **Resilience**: Network failures won't stop the scanner
 - **Scale**: Works with any number of open trades
 - **Future**: Can be extended with weekly digests, per-pattern breakdowns, etc.
-

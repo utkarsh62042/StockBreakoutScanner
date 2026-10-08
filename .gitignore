@@ -3,12 +3,12 @@
 config.yaml
 
 # Runtime artifacts
-data_cache/
-logs/
-output/
+/logs/
+/output/
 *.db
 *.sqlite
 *.sqlite3
+*_run.log
 
 # Python
 __pycache__/

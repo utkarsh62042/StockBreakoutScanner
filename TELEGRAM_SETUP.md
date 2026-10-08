@@ -143,8 +143,6 @@ After end-of-day settlement (4:00 PM IST), Bot 2 sends you a summary message:
   Net P&L: ₹45,320
 ```
 
-**The stats automatically reset** when you wipe the paper trading sheet (the system detects the change).
-
 ---
 
 ## Verification
@@ -247,4 +245,3 @@ Save your settings:
 | Breakout Chat ID | `TELEGRAM_BREAKOUT_ALERTS_CHAT_ID=` | Your User ID |
 | Summary Bot Token | `TELEGRAM_TRADES_SUMMARY_BOT_TOKEN=` | Sends daily trades summary |
 | Summary Chat ID | `TELEGRAM_TRADES_SUMMARY_CHAT_ID=` | Your User ID |
-

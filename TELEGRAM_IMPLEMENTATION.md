@@ -1,46 +1,32 @@
 # Telegram Notification Implementation
 
-This document describes the implementation of the two-group Telegram notification system.
+This document describes the implementation of the two-bot Telegram notification system.
 
 ## Architecture
 
 ### Components
 
 1. **Config Updates** (`breakout/config.py`)
-   - Added two new credential fields:
+   - Added four new credential fields:
+     - `telegram_breakout_alerts_bot_token`: Bot token for breakout alerts
      - `telegram_breakout_alerts_chat_id`: Chat ID for fresh breakout alerts
+     - `telegram_trades_summary_bot_token`: Bot token for trades summary
      - `telegram_trades_summary_chat_id`: Chat ID for daily trades summary
-   - New property `has_telegram_notifications` to check if both chat IDs are configured
+   - New properties:
+     - `has_telegram_breakout_alerts`: Check if breakout alerts are configured
+     - `has_telegram_trades_summary`: Check if trades summary is configured
+     - `has_telegram_notifications`: Check if either is configured
 
 2. **Trades Summary Module** (`breakout/output/trades_summary.py`)
-   - `TradeDetail`: Dataclass for active trade information
-   - `HistoricStats`: Dataclass for performance statistics
    - `compute_active_trades()`: Extracts currently open trades
    - `compute_historic_stats()`: Calculates win rate, avg R, P&L
-   - `format_telegram_trades_summary()`: Formats message for Telegram
    - `send_trades_summary()`: Sends message to Telegram chat
 
-3. **Alert Dispatcher Updates** (`breakout/output/alerts.py`)
-   - Enhanced `TelegramChannel` to accept `alerts_chat_id` parameter
-   - Routes alerts to dedicated chat instead of default chat
-
-4. **EOD Settle Job Integration** (`breakout/jobs/eod_settle.py`)
+3. **EOD Settle Job Integration** (`breakout/jobs/eod_settle.py`)
    - Calls `_send_trades_summary()` after settlement completes
-   - Sends active trades + historic stats to Trades Summary chat
+   - Sends active trades + historic stats to Trades Summary bot
 
 ## Data Flow
-
-### Breakout Alerts
-
-```
-preclose_scan → detect confirmation → create Alert
-                                      ↓
-                                  dispatch_alerts()
-                                      ↓
-                              TelegramChannel.emit()
-                                      ↓
-                         TELEGRAM_BREAKOUT_ALERTS_CHAT_ID
-```
 
 ### Trades Summary
 
@@ -50,10 +36,9 @@ eod_settle → settle all trades → _send_trades_summary()
                     compute_active_trades()
                     compute_historic_stats()
                                      ↓
-                    format_telegram_trades_summary()
-                                     ↓
                            send_trades_summary()
                                      ↓
+                      TELEGRAM_TRADES_SUMMARY_BOT_TOKEN
                       TELEGRAM_TRADES_SUMMARY_CHAT_ID
 ```
 
@@ -62,13 +47,13 @@ eod_settle → settle all trades → _send_trades_summary()
 ### Environment Variables (`.env`)
 
 ```bash
-TELEGRAM_BOT_TOKEN=<bot_token>
-TELEGRAM_CHAT_ID=<user_id>
+TELEGRAM_BREAKOUT_ALERTS_BOT_TOKEN=<bot_token>
 TELEGRAM_BREAKOUT_ALERTS_CHAT_ID=<user_id>
+TELEGRAM_TRADES_SUMMARY_BOT_TOKEN=<bot_token>
 TELEGRAM_TRADES_SUMMARY_CHAT_ID=<user_id>
 ```
 
-Note: All chat IDs should be positive integers (your Telegram User ID). You can use the same User ID for both notifications or different ones.
+Note: All chat IDs should be positive integers (your Telegram User ID).
 
 ### Config File (`config.yaml`)
 
@@ -84,7 +69,6 @@ output:
 ### Active Trades Extraction
 
 Identifies trades in open states:
-- `ALERTED` (legacy)
 - `ENTERED` (actively trading)
 - `TARGET_1_HIT` (partial profit taken, still holding)
 
@@ -92,32 +76,14 @@ Identifies trades in open states:
 
 Computes from all closed trades:
 - **Total trades**: All trades ever created
-- **Achieved trades**: Closed with profit (TARGET_HIT or TARGET_1_HIT)
-- **Failed trades**: Closed with loss (STOPPED_OUT)
+- **Achieved trades**: Closed with profit
+- **Failed trades**: Closed with loss
 - **Ongoing trades**: Still open
 - **Win rate**: % of closed trades with profit
 - **Avg R**: Average R-multiple across all closed trades
 - **Net P&L**: Total P&L after transaction costs
 
-### Auto-Reset on Wipe
-
-The system detects when the paper trades sheet is wiped:
-1. Computes hash of all trade IDs at runtime
-2. If hash changes significantly, the sheet was wiped
-3. Historic stats automatically reset for next period
-
 ## Telegram Message Format
-
-### Alert Message
-```
-🚨 BREAKOUT — INFY
-Pattern: cup_and_handle | Score: 85
-Entry: ₹1500.00  Stop: ₹1480.00
-T1: ₹1530.00  T2: ₹1560.00
-Shares: 10  Vol: 2.5x
-```
-
-One message per alert for easy scanning.
 
 ### Summary Message
 ```
@@ -139,7 +105,7 @@ One message per alert for easy scanning.
 - If `requests` library is unavailable, Telegram is disabled with a warning
 - Send failures are logged but don't stop the job
 - Messages are sent with a 10-second timeout
-- Both group notifications are optional; missing configuration doesn't crash the system
+- Telegram configuration is optional; missing credentials don't crash the system
 
 ## Trade State Machine
 
@@ -174,27 +140,25 @@ Test with sample data:
 from breakout.output.trades_summary import (
     compute_active_trades,
     compute_historic_stats,
-    format_telegram_trades_summary
+    send_trades_summary
 )
 
 trades = [...]  # list of trade dicts
 active = compute_active_trades(trades)
 stats = compute_historic_stats(trades)
-msg = format_telegram_trades_summary(active, stats)
+success = send_trades_summary(bot_token, chat_id, active, stats)
 ```
 
 ## Deployment
 
-1. Update `.env` with bot token and group IDs
+1. Update `.env` with bot tokens and chat IDs
 2. Set `output.telegram: true` in `config.yaml`
-3. Verify bot is admin in both groups
-4. Next preclose_scan sends alerts to Breakout Alerts group
-5. Next eod_settle sends summary to Trades Summary group
+3. Next eod_settle sends summary to Trades Summary bot
+4. Monitor logs for successful sends
 
 ## Performance
 
 - Trade summary computation: O(n) where n = number of trades
-- Hash computation: O(n) for trade ID list
 - Telegram send: Network bound, 10-second timeout per message
 - Memory: Minimal, no caching beyond what the Store provides
 
@@ -204,7 +168,6 @@ Potential additions:
 - Scheduled summaries (e.g., weekly digest)
 - Detailed trade-by-trade breakdowns
 - Performance charts as images
-- Real-time position updates (requires market data integration)
+- Real-time position updates
 - Multiple portfolio support
 - Webhook-based triggers for specific conditions
-

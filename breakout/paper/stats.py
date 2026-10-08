@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-from datetime import timedelta
+from datetime import date, timedelta
 
 from breakout.analysis.session import today_ist
 from breakout.output.digest import PerfStats, _num, _perf, compute_digest, render_digest

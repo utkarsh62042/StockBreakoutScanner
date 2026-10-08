@@ -158,15 +158,9 @@ NSE delivery (CNC) charges for both legs:
 | Channel | Enabled | Assessment |
 |---------|---------|-----------|
 | **CSV** | true | ✅ Good (output/alerts_YYYY-MM-DD.csv) |
-| **Telegram** | false | ⚠️ Recommended to enable for alerts |
-| **Email** | false | ⚠️ Optional |
+| **Email** | false | ⚠️ Optional (coming soon) |
 
-**For paper trading:** Enable **Telegram** or **Email** so you get alerts in real-time (not just CSV after the fact).
-
-**To enable Telegram:**
-1. Create a bot via @BotFather on Telegram
-2. Add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to `.env` file
-3. Set `telegram: true` in config
+**For paper trading:** CSV output is active. Email integration is coming in a future update.
 
 ---
 
@@ -192,7 +186,6 @@ NSE delivery (CNC) charges for both legs:
 | **Market regime** | ✅ | None — working correctly |
 | **Cost modeling** | ✅ | None — accurate |
 | **Data cache location** | ⚠️ | Monitor for sync issues; move if deploying to cloud |
-| **Telegram alerts** | ⚠️ | Enable for real-time notifications during paper trading |
 
 ---
 
@@ -201,10 +194,9 @@ NSE delivery (CNC) charges for both legs:
 ✅ **YES.** Configuration is production-ready.
 
 **Before starting:**
-1. Enable Telegram or Email (optional, but recommended)
-2. Check that `logs/` and `output/` folders are created
-3. Verify `data_cache/` isn't locked by OneDrive sync
-4. Run a test scan: `python -m breakout.jobs.morning_scan --help`
+1. Check that `logs/` and `output/` folders are created
+2. Verify `data_cache/` isn't locked by OneDrive sync
+3. Run a test scan: `python -m breakout.jobs.morning_scan --help`
 
 **During paper trading (4 weeks):**
 - Log all alerts and trade outcomes

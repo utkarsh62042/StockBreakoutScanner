@@ -51,7 +51,7 @@ This system automates the scan. It looks at all 500 stocks twice a day, applies 
 Daily during trading hours:
 
 - **A setup watchlist** — stocks that are *near* breaking out (within 2% of their breakout level) and have passed all quality and stage filters.
-- **Alerts (CSV file, optionally Telegram)** — issued in the last 25 minutes of the trading session for stocks that *actually confirmed* a breakout that day (closed above level with above-average volume). Each alert includes precise entry, stop-loss, two targets, and position size sized to your risk-per-trade setting.
+- **Alerts (CSV file)** — issued in the last 25 minutes of the trading session for stocks that *actually confirmed* a breakout that day (closed above level with above-average volume). Each alert includes precise entry, stop-loss, two targets, and position size sized to your risk-per-trade setting.
 - **A paper trade audit log** — every alert is automatically logged as a virtual position and tracked through the same state machine a real trade would follow. After 4–6 weeks you have data on win rate, average R-multiple, and which patterns are working in current market conditions.
 
 ### What it is NOT
@@ -154,7 +154,7 @@ Stocks scoring ≥ 50 go on the watchlist. Stocks scoring ≥ 60 *and* confirmin
 | **`python-dotenv`** | Loads `.env` into environment variables. Keeps credentials out of `config.yaml` (which can be safely committed) and out of source. |
 | **`rich`** | Pretty console tables and colored log output. Optional but the CSV alone is less scannable than a `rich.Table`. |
 | **`pytest`** | Standard. 78 tests across pivots / indicators / patterns / stage / end-to-end. |
-| **`requests`** | For the NSE CSV download and (Phase 2) Telegram dispatch. |
+| **`requests`** | For the NSE CSV download and email dispatch. |
 | **`pyyaml`** | Config file format. Human-readable + structured. |
 
 ### Why NOT these technologies
@@ -199,7 +199,7 @@ Stocks scoring ≥ 50 go on the watchlist. Stocks scoring ≥ 60 *and* confirmin
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
 │ OUTPUT LAYER                                                │
-│ Watchlist (workbook) → Alerts (CSV / Telegram)              │
+│ Watchlist (workbook) → Alerts (CSV)                         │
 │ Paper trades (workbook, lifecycle: ALERTED→ENTERED→...)     │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -289,7 +289,7 @@ BreakoutStockAnalyser/
 | `breakout/analysis/stage.py` | `classify_stage(df)` returns `Stage.STAGE_1` through `STAGE_4` or `UNKNOWN`. |
 | `breakout/filters/quality.py` | `check_quality(df, metadata, thresholds)` — hard gate; returns `QualityResult(passed, reasons_failed)`. |
 | `breakout/paper/tracker.py` | `position_size`, `compute_stop`, `compute_targets`, `insert_alert`, `settle_one_trade`, `apply_outcome`. The full paper-trade lifecycle. |
-| `breakout/output/alerts.py` | `Alert` dataclass, `CSVChannel`, `TelegramChannel` (stubbed), `build_channels(cfg)`, `dispatch_alerts(alerts, channels)`. |
+| `breakout/output/alerts.py` | `Alert` dataclass, `CSVChannel`, `build_channels(cfg)`, `dispatch_alerts(alerts, channels)`. |
 | `breakout/jobs/morning_scan.py` | Entry point: refresh universe → fetch prices → analyze each → populate `setup_watchlist`. |
 | `breakout/jobs/preclose_scan.py` | Entry point: re-fetch today's data for watchlist stocks → confirm breakouts → emit alerts + insert paper trades. |
 | `breakout/jobs/eod_settle.py` | Entry point: walk every open paper trade through the state machine using today's OHLC. |
@@ -1014,14 +1014,13 @@ All three are invokable as `python -m breakout.jobs.<job_name>`. Designed to be 
 3. Check breakout confirmation: `close > breakout_level AND today_volume ≥ 1.5 × 20-day average`.
 4. For confirmed breakouts:
    - Compute entry (today's close), stop (1.5× ATR below level), two targets, position size.
-   - Emit an `Alert` through every enabled output channel (CSV, optionally Telegram).
+   - Emit an `Alert` through every enabled output channel (CSV).
    - Insert a paper trade row with state = `ALERTED`.
    - Add the stock to the `pullback_watchlist` so future retests can be flagged.
 
 **Output:**
 - A `rich` table to console showing each confirmed alert.
 - `output/alerts_YYYY-MM-DD.csv` with full alert details (or appends if file exists from morning).
-- Optionally, a Telegram message per alert (Phase 1: stub; Phase 2: live).
 - Run log entry in the workbook.
 
 **Why the 3:00 PM timing:** Closing breakouts have a meaningfully higher success rate than intraday breakouts. Stocks that broke out at 11 AM might sell off by 2 PM (false breakout). Waiting until the final 25 minutes filters those out — institutional commitment shows in the close.
@@ -1207,7 +1206,7 @@ cd "C:\Users\kutkar01\OneDrive - dentsu\Desktop\Personal\BreakoutStockAnalyser"
 # 2. Create a venv and install dependencies
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -e .[telegram]
+.\.venv\Scripts\python.exe -m pip install -e .
 .\.venv\Scripts\python.exe -m pip install smartapi-python pyotp logzero websocket-client
 
 # 3. Copy config templates and fill in credentials
@@ -1390,7 +1389,7 @@ Working MVP that you can run today.
 - ✅ Quality filter (with pledge stubbed)
 - ✅ Composite scoring (with RS/tightness/sector defaulted to 0)
 - ✅ Paper trade state machine with position sizing
-- ✅ Pluggable alert dispatcher (CSV active, Telegram stubbed)
+- ✅ Pluggable alert dispatcher (CSV active)
 - ✅ Three job entry points (morning, preclose, eod)
 - ✅ 78 tests
 - ✅ End-to-end smoke test
@@ -1407,7 +1406,8 @@ The confirmation layer. Significantly improves scoring quality.
 - ⏳ Earnings blackout filter (need to source corporate-actions data)
 - ⏳ Market mood gate (India VIX vs 90-day SMA)
 - ⏳ Promoter pledge data source (Screener.in scrape or nsepython)
-- ⏳ Telegram dispatch (currently stubbed)
+- ⏳ Email dispatch
+- ⏳ Teams/Slack integration (planned to replace Telegram)
 - ⏳ Daily digest output (paper-trade performance summary)
 
 After Phase 2, alert scores will span the full 0–100 range and high-scoring setups will be meaningfully more distinguishable from borderline ones.
@@ -1522,11 +1522,6 @@ output:
   csv: true
   # CSV file at output/alerts_YYYY-MM-DD.csv. Always recommended.
 
-  telegram: false
-  # Set to true and fill TELEGRAM_* in .env to enable Telegram dispatch.
-  # Phase 2 will wire this; for Phase 1, set it to true with credentials and
-  # the channel will be built but the implementation is minimal.
-
   email: false
   # Not implemented in Phase 1.
 
@@ -1606,10 +1601,6 @@ ANGELONE_API_KEY=<from smartapi.angelbroking.com>
 ANGELONE_CLIENT_CODE=<your Angel One login ID, e.g. K236239>
 ANGELONE_PIN=<your Angel One PIN, 4 digits>
 ANGELONE_TOTP_SECRET=<base32 string from Angel One -> Enable TOTP>
-
-# Telegram (Phase 2)
-TELEGRAM_BOT_TOKEN=<from @BotFather>
-TELEGRAM_CHAT_ID=<your numeric chat id>
 
 # Email SMTP (Phase 2)
 SMTP_HOST=smtp.gmail.com

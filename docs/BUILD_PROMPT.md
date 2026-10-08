@@ -31,7 +31,7 @@ Ask these in a single message, formatted as a numbered list. Wait for answers be
    - `yfinance` (no account needed — recommended if you don't already have a broker API key)
    - `angelone` (Angel One SmartAPI — needs an Angel One demat account and API credentials)
    - `upstox` (Upstox API — needs an Upstox demat account and API credentials)
-3. **Output method?** `csv_only` / `csv_plus_telegram` / `csv_plus_email` (Telegram and email can be added later — `csv_only` is the simplest start.)
+3. **Output method?** `csv_only` / `csv_plus_email` (Email can be added later — `csv_only` is the simplest start.)
 4. **Trading capital (INR)?** Used to calculate position sizes. Default: `500000`.
 5. **Risk per trade (%)?** Default: `1.0` (means risk 1% of capital per trade).
 6. **Should I set up the cron / Task Scheduler entries automatically?** `yes` / `no` (if no, you'll get a manual setup guide.)
@@ -53,7 +53,6 @@ After collecting answers, write them to `config.yaml` and proceed to Phase 1.
   - `sqlalchemy` or raw `sqlite3` — SQLite persistence (prefer raw sqlite3 for simplicity here)
   - `pytest` — testing
   - `rich` — pretty console output
-  - `python-telegram-bot` (only if Telegram chosen)
   - `apscheduler` (optional, for in-process scheduling if cron not used)
 - **No deep learning libraries.** No `tensorflow`, no `torch`. This is rule-based, not ML.
 
@@ -85,7 +84,7 @@ After collecting answers, write them to `config.yaml` and proceed to Phase 1.
 2. For **setup watchlist** stocks: check if current price > breakout level AND today's volume ≥ 1.5× 20-day avg volume. If yes, generate an `ALERT: BREAKOUT` for that ticker.
 3. For **pullback watchlist** stocks: check if today's low touched the breakout level (within 1% above) AND current price is now above the breakout level AND today's candle shows a reversal (lower wick longer than body, OR close > open). If yes, generate `ALERT: PULLBACK_ENTRY`.
 4. For each alert, calculate stop, targets, position size.
-5. Write alerts to CSV. Dispatch via Telegram/email if configured.
+5. Write alerts to CSV.
 6. Log new paper trade entries (state = `ALERTED`).
 
 **EOD settle (`eod_settle.py`)** — runs at 4:00 PM IST.
@@ -380,7 +379,7 @@ Improve scoring to use all signal sources.
 
 Add `output/digest.py` for paper trade performance summaries.
 
-Add Telegram/email output if user chose those.
+Add email output and prepare infrastructure for Teams/Slack integration (planned future replacement for Telegram).
 
 ### Phase 3: Validation and polish
 

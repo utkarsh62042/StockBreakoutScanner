@@ -30,18 +30,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Option 2: Install with Telegram Support
-
-If you want real-time Telegram alerts:
-
-```bash
-# Activate virtual environment first (see above)
-
-# Install core + Telegram dependencies
-pip install -r requirements.txt -r requirements-telegram.txt
-```
-
-### Option 3: Development Setup
+### Option 2: Development Setup
 
 If you're contributing to the project:
 
@@ -52,16 +41,13 @@ If you're contributing to the project:
 pip install -r requirements.txt -r requirements-dev.txt
 ```
 
-### Option 4: Using pyproject.toml (Modern Method)
+### Option 3: Using pyproject.toml (Modern Method)
 
 ```bash
 # Activate virtual environment
 
 # Core dependencies only
 pip install -e .
-
-# With Telegram support
-pip install -e ".[telegram]"
 
 # With development tools
 pip install -e ".[dev]"
@@ -79,11 +65,6 @@ Core dependencies needed to run the scanner:
 - **Logging:** logzero, websocket-client
 
 **Install with:** `pip install -r requirements.txt`
-
-### `requirements-telegram.txt`
-Optional Telegram bot support for real-time alerts on your phone.
-
-**Install with:** `pip install -r requirements.txt -r requirements-telegram.txt`
 
 ### `requirements-dev.txt`
 Development tools: testing, linting, type checking.

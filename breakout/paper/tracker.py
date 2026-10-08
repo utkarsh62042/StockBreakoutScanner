@@ -351,34 +351,31 @@ def _apply_slippage_to_stop(
     today_low: float,
     slippage_pct: float = 0.5,
 ) -> tuple[float, bool]:
-    """Calculate realistic fill price on stop-loss hit, accounting for slippage.
+    """Determine the ideal fill price on stop-loss hit.
 
-    On gap-down breaks, the position is filled at available liquidity, which is
-    typically worse than the exact stop price:
-    - If gap opens below stop: fill is typically 30-50 bps below the open
-    - If intraday breach: fill is typically near the stop but can be worse
+    Returns the "ideal" price where the stop would fill (stop price for intraday,
+    open price for gap-downs). Slippage costs are modeled separately in costs.py,
+    not applied to the fill price here.
 
     Args:
         stop_loss: Configured stop-loss price
         today_open: Today's opening price
         today_low: Today's low price
-        slippage_pct: Expected slippage in basis points / 100 (default 50 bps)
+        slippage_pct: Not used (slippage costs handled by settle_pnl)
 
     Returns:
-        (fill_price, was_gapped): Realistic fill price and whether it gapped
+        (fill_price, was_gapped): Ideal fill price and whether it gapped
     """
     gapped = today_open < stop_loss
 
     if gapped:
-        # Gap down: fill is at the low (or slightly worse with slippage buffer)
-        slippage_amount = stop_loss * slippage_pct / 100.0
-        # Worst-case fill: at the low but with slippage
-        fill_price = min(today_low, today_open - slippage_amount)
+        # Gap down: fill is at the open (when the gap occurred), but never
+        # better than the actual low (can't trade through the low)
+        fill_price = max(today_low, today_open)
         return fill_price, True
     else:
-        # Intraday breach: fill at stop with small slippage buffer
-        slippage_amount = stop_loss * slippage_pct / 100.0
-        fill_price = stop_loss - slippage_amount
+        # Intraday breach: fill at stop loss price
+        fill_price = stop_loss
         return fill_price, False
 
 
@@ -454,11 +451,11 @@ def settle_one_trade(
     # - Intraday breach: fill at stop minus slippage buffer
     if today_low <= stop_loss:
         today_open = float(today_ohlc["open"])
-        slippage_bps = cfg.costs.slippage_pct if cfg.costs.enabled else 0.5
+        slippage_bps = cfg.costs.slippage_pct if cfg.costs.enabled else 0
         exit_price, gapped = _apply_slippage_to_stop(
             stop_loss, today_open, today_low, slippage_pct=slippage_bps
         )
-        gap_note = f"gap_down_fill:{exit_price:.2f}" if gapped else f"stop_hit:{exit_price:.2f}"
+        gap_note = "stop_gap_open" if gapped else "stop_hit_intraday"
         return _close_at(exit_price, TradeState.STOPPED_OUT, gap_note)
 
     # 2. Full target (target_2) hit. No mirror-image fix needed here: filling at
