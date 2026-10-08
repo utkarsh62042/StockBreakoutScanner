@@ -57,6 +57,10 @@ jobs:
       - name: Run scanner
         env:
           PYTHONPATH: .
+          TELEGRAM_BREAKOUT_ALERTS_BOT_TOKEN: ${{ secrets.TELEGRAM_BREAKOUT_ALERTS_BOT_TOKEN }}
+          TELEGRAM_BREAKOUT_ALERTS_CHAT_ID: ${{ secrets.TELEGRAM_BREAKOUT_ALERTS_CHAT_ID }}
+          TELEGRAM_TRADES_SUMMARY_BOT_TOKEN: ${{ secrets.TELEGRAM_TRADES_SUMMARY_BOT_TOKEN }}
+          TELEGRAM_TRADES_SUMMARY_CHAT_ID: ${{ secrets.TELEGRAM_TRADES_SUMMARY_CHAT_ID }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             JOB="${{ inputs.job }}"
