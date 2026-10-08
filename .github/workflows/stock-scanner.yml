@@ -38,19 +38,6 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Test Telegram
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BREAKOUT_ALERTS_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_BREAKOUT_ALERTS_CHAT_ID }}
-        run: |
-          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${TELEGRAM_CHAT_ID}" \
-            --data-urlencode text="✅ GitHub Actions Telegram test successful."
-      - name: Checkout repository
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
