@@ -2,7 +2,7 @@ name: Stock Breakout Scanner
 
 on:
   schedule:
-    - cron: "10 5 * * 1-5"
+    - cron: "15 5 * * 1-5"
     - cron: "50 9 * * 1-5"
     - cron: "30 10 * * 1-5"
 
@@ -56,7 +56,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             JOB="${{ inputs.job }}"
-          elif [ "${{ github.event.schedule }}" = "10 5 * * 1-5" ]; then
+          elif [ "${{ github.event.schedule }}" = "15 5 * * 1-5" ]; then
             JOB="morning_scan"
           elif [ "${{ github.event.schedule }}" = "50 9 * * 1-5" ]; then
             JOB="preclose_scan"
