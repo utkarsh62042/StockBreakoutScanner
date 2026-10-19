@@ -248,7 +248,11 @@ def _flag_failed_breakouts(store, fetcher, today: date, symbols_seen: set) -> in
 def _send_trades_summary(store: Store, cfg: Config) -> None:
     """Send active trades and stats summary to Telegram chat using dedicated bot."""
     if not cfg.credentials.has_telegram_trades_summary:
-        return
+        logger.error(
+        "Cannot send trades summary: trades-summary bot token "
+        "or chat ID is missing."
+    )
+    return
 
     try:
         all_trades = store.read_paper_trades_by_state() or []

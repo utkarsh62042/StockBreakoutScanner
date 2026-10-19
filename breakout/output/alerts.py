@@ -9,6 +9,7 @@ config change plus credential setup.
 from __future__ import annotations
 
 import csv
+import requests
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
@@ -117,6 +118,85 @@ class CSVChannel(AlertChannel):
         logger.info(f"wrote {len(alerts)} alerts to {path}")
 
 
+# ── Telegram channel ────────────────────────────────────────────────
+
+class TelegramChannel(AlertChannel):
+    """Send breakout alerts to the configured Telegram chat."""
+
+    def __init__(self, bot_token: str, chat_id: str):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+
+    def emit(self, alerts: list[Alert], run_date: date) -> None:
+        if not alerts:
+            logger.info("Telegram: no breakout alerts to send")
+            return
+
+        lines = [
+            f"Stock Breakout Scanner — {run_date.isoformat()}",
+            f"Alerts: {len(alerts)}",
+            "",
+        ]
+
+        for a in alerts:
+            lines.extend([
+                f"{a.symbol} — {a.alert_type}",
+                f"Pattern: {a.pattern} | Score: {a.score:.0f}",
+                f"Entry: {a.entry_price:.2f}",
+                f"Stop: {a.stop_loss:.2f}",
+                f"Target 1: {a.target_1:.2f} | Target 2: {a.target_2:.2f}",
+                f"Volume ratio: {a.volume_ratio:.1f}x",
+                "",
+            ])
+
+        # Telegram allows up to 4096 characters per message.
+        # Split on alert boundaries to stay comfortably below the limit.
+        chunks = []
+        current = lines[:3]
+
+        for a in alerts:
+            block = [
+                f"{a.symbol} — {a.alert_type}",
+                f"Pattern: {a.pattern} | Score: {a.score:.0f}",
+                f"Entry: {a.entry_price:.2f}",
+                f"Stop: {a.stop_loss:.2f}",
+                f"Target 1: {a.target_1:.2f} | Target 2: {a.target_2:.2f}",
+                f"Volume ratio: {a.volume_ratio:.1f}x",
+                "",
+            ]
+
+            if len("\n".join(current + block)) > 3500 and len(current) > 3:
+                chunks.append("\n".join(current))
+                current = [
+                    f"Stock Breakout Scanner — {run_date.isoformat()}",
+                    "",
+                ]
+
+            current.extend(block)
+
+        if len(current) > 2:
+            chunks.append("\n".join(current))
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+
+        for message in chunks:
+            try:
+                response = requests.post(
+                    url,
+                    json={"chat_id": self.chat_id, "text": message},
+                    timeout=15,
+                )
+                response.raise_for_status()
+                result = response.json()
+
+                if not result.get("ok"):
+                    logger.error("Telegram rejected alert: %s", result)
+                else:
+                    logger.info("Telegram breakout alert sent")
+
+            except Exception:
+                logger.exception("Failed to send Telegram breakout alert")
+
 # ── Console preview ──────────────────────────────────────────────────────
 
 
@@ -155,13 +235,31 @@ def render_alerts_table(alerts: list[Alert], title: str = "Alerts") -> None:
 # ── Dispatcher ───────────────────────────────────────────────────────────
 
 
+
 def build_channels(cfg: Config) -> list[AlertChannel]:
-    """Construct the active channels from config. CSV is always on
-    when `output.csv` is true."""
+    """Construct enabled alert delivery channels."""
+
     channels: list[AlertChannel] = []
+
     if cfg.output.csv:
         channels.append(CSVChannel(cfg.paths.output))
+
+    if cfg.output.telegram:
+        if cfg.credentials.has_telegram_breakout_alerts:
+            channels.append(
+                TelegramChannel(
+                    cfg.credentials.telegram_breakout_alerts_bot_token,
+                    cfg.credentials.telegram_breakout_alerts_chat_id,
+                )
+            )
+        else:
+            logger.error(
+                "Telegram is enabled but breakout-alert bot credentials "
+                "are missing."
+            )
+
     return channels
+
 
 
 def dispatch_alerts(
